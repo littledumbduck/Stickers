@@ -125,11 +125,12 @@ fun HomeScreen(
         PackInfoDialog(
             title = "Nuevo paquete",
             confirmText = "Crear",
+            askAnimated = true,
             onDismiss = { showCreate = false },
-            onConfirm = { name, publisher ->
+            onConfirm = { name, publisher, animated ->
                 showCreate = false
                 scope.launch {
-                    val pack = withContext(Dispatchers.IO) { repo.createPack(name, publisher) }
+                    val pack = withContext(Dispatchers.IO) { repo.createPack(name, publisher, animated) }
                     onOpenPack(pack.identifier)
                 }
             },
@@ -192,7 +193,8 @@ private fun PackCard(pack: StickerPack, isAdded: Boolean, dir: File, onClick: ()
                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
                     Text(pack.name, style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "${pack.publisher} · ${pack.stickers.size}/${StickerLimits.MAX_STICKERS}",
+                        (if (pack.animated) "Animado · " else "") +
+                            "${pack.publisher} · ${pack.stickers.size}/${StickerLimits.MAX_STICKERS}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

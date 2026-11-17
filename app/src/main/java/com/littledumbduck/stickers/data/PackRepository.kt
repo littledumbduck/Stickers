@@ -1,8 +1,8 @@
 package com.littledumbduck.stickers.data
 
 import android.content.Context
-import android.graphics.BitmapFactory
 import com.littledumbduck.stickers.image.StickerProcessor
+import com.littledumbduck.stickers.image.WebpCodec
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,7 +31,7 @@ class PackRepository private constructor(context: Context) {
 
     // ---------- Paquetes ----------
 
-    fun createPack(name: String, publisher: String): StickerPack = synchronized(lock) {
+    fun createPack(name: String, publisher: String, animated: Boolean = false): StickerPack = synchronized(lock) {
         val id = "pack_" + System.currentTimeMillis()
         packDir(id).mkdirs()
         val pack = StickerPack(
@@ -39,6 +39,7 @@ class PackRepository private constructor(context: Context) {
             name = name.trim().take(StickerLimits.MAX_TEXT),
             publisher = publisher.trim().take(StickerLimits.MAX_TEXT),
             trayImageFile = null,
+            animated = animated,
         )
         save(pack)
         pack
@@ -64,7 +65,8 @@ class PackRepository private constructor(context: Context) {
     fun putSticker(
         packId: String,
         webp: ByteArray,
-        sourcePng: ByteArray?,
+        source: ByteArray?,
+        sourceExtension: String = "png",
         emojis: List<String>,
         borderColor: Int?,
         borderWidth: Int,
@@ -78,8 +80,8 @@ class PackRepository private constructor(context: Context) {
         val dir = packDir(packId).apply { mkdirs() }
         val webpName = "sticker_$key.webp"
         File(dir, webpName).writeBytes(webp)
-        val srcName = sourcePng?.let { bytes ->
-            "source_$key.png".also { File(dir, it).writeBytes(bytes) }
+        val srcName = source?.let { bytes ->
+            "source_$key.$sourceExtension".also { File(dir, it).writeBytes(bytes) }
         }
         val sticker = Sticker(
             fileName = webpName,
@@ -156,8 +158,9 @@ class PackRepository private constructor(context: Context) {
     }
 
     private fun writeTray(pack: StickerPack, from: Sticker): StickerPack {
-        val bmp = BitmapFactory.decodeFile(file(pack.identifier, from.fileName).absolutePath)
-            ?: return pack
+        // El icono siempre es estático: primer fotograma si el sticker es animado
+        val bytes = file(pack.identifier, from.fileName).takeIf { it.exists() }?.readBytes() ?: return pack
+        val bmp = WebpCodec.decodeFirstFrame(bytes) ?: return pack
         val png = StickerProcessor.makeTrayIcon(bmp)
         pack.trayImageFile?.let { file(pack.identifier, it).delete() }
         val name = "tray_${pack.imageDataVersion}_${UUID.randomUUID().toString().take(4)}.png"

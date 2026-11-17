@@ -10,6 +10,8 @@ object StickerLimits {
     const val MAX_EMOJIS = 3
     const val STICKER_SIZE = 512
     const val STICKER_MAX_BYTES = 100 * 1024
+    const val ANIMATED_STICKER_MAX_BYTES = 500 * 1024
+    const val ANIMATED_MAX_DURATION_MS = 10_000
     const val TRAY_SIZE = 96
     const val TRAY_MAX_BYTES = 50 * 1024
     const val MAX_TEXT = 128
@@ -19,7 +21,10 @@ data class Sticker(
     /** Archivo .webp de 512x512 que se entrega a WhatsApp. */
     val fileName: String,
     val emojis: List<String>,
-    /** PNG con la imagen recortada sin borde, para poder volver a editar el sticker. */
+    /**
+     * Imagen recortada sin borde, para poder volver a editar el sticker: PNG si es estática o
+     * WebP animado sin pérdida si es animada.
+     */
     val sourceFile: String? = null,
     /** Color del borde (ARGB) o null si no tiene borde. */
     val borderColor: Int? = null,
@@ -57,6 +62,8 @@ data class StickerPack(
     val trayImageFile: String?,
     /** Si es true el icono de la bandeja se genera automáticamente con el primer sticker. */
     val trayAuto: Boolean = true,
+    /** Paquete de stickers animados (WhatsApp no permite mezclar animados y estáticos). */
+    val animated: Boolean = false,
     /** WhatsApp vuelve a leer las imágenes cuando cambia este número. */
     val imageDataVersion: Int = 1,
     val stickers: List<Sticker> = emptyList(),
@@ -82,6 +89,7 @@ data class StickerPack(
         put("publisher", publisher)
         trayImageFile?.let { put("tray", it) }
         put("trayAuto", trayAuto)
+        put("animated", animated)
         put("imageDataVersion", imageDataVersion)
         put("createdAt", createdAt)
         put("stickers", JSONArray().apply { stickers.forEach { put(it.toJson()) } })
@@ -96,6 +104,7 @@ data class StickerPack(
                 publisher = o.optString("publisher"),
                 trayImageFile = o.optString("tray").ifEmpty { null },
                 trayAuto = o.optBoolean("trayAuto", true),
+                animated = o.optBoolean("animated", false),
                 imageDataVersion = o.optInt("imageDataVersion", 1),
                 createdAt = o.optLong("createdAt", 0L),
                 stickers = List(arr.length()) { Sticker.fromJson(arr.getJSONObject(it)) },

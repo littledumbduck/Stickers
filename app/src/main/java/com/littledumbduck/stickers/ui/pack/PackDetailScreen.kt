@@ -232,13 +232,19 @@ fun PackDetailScreen(
                                 RoundedCornerShape(14.dp),
                             )
                             .clickable {
-                                pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                // En paquetes animados también se aceptan vídeos (los GIF ya son imágenes)
+                                val type = if (pack.animated) ActivityResultContracts.PickVisualMedia.ImageAndVideo
+                                else ActivityResultContracts.PickVisualMedia.ImageOnly
+                                pickImage.launch(PickVisualMediaRequest(type))
                             },
                         contentAlignment = Alignment.Center,
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary)
-                            Text("Desde galería", style = MaterialTheme.typography.labelSmall)
+                            Text(
+                                if (pack.animated) "GIF o vídeo" else "Desde galería",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
                         }
                     }
                 }
@@ -354,7 +360,7 @@ fun PackDetailScreen(
             initialName = pack.name,
             initialPublisher = pack.publisher,
             onDismiss = { editInfo = false },
-            onConfirm = { name, publisher ->
+            onConfirm = { name, publisher, _ ->
                 editInfo = false
                 scope.launch(Dispatchers.IO) { repo.updatePackInfo(pack.identifier, name, publisher) }
             },
@@ -413,7 +419,8 @@ private fun PackHeader(pack: StickerPack, dir: File) {
         Column(Modifier.padding(start = 16.dp)) {
             Text(pack.name, style = MaterialTheme.typography.titleLarge)
             Text(
-                "de ${pack.publisher} · ${pack.stickers.size}/${StickerLimits.MAX_STICKERS} stickers",
+                "de ${pack.publisher} · ${pack.stickers.size}/${StickerLimits.MAX_STICKERS} stickers" +
+                    if (pack.animated) " · animado" else "",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

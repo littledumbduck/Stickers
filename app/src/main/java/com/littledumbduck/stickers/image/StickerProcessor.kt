@@ -9,9 +9,13 @@ import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.PointF
+import android.graphics.Rect
+import android.graphics.RectF
 import android.os.Build
 import com.littledumbduck.stickers.data.StickerLimits
 import java.io.ByteArrayOutputStream
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -34,21 +38,35 @@ object StickerProcessor {
         return Bitmap.createBitmap(src, l, t, r - l, b - t)
     }
 
-    /** Conserva solo lo que queda dentro del trazo a mano alzada y recorta el sobrante. */
-    fun lassoCut(src: Bitmap, points: List<PointF>): Bitmap {
-        if (points.size < 3) return src
+    /**
+     * Conserva solo lo que queda dentro del trazo a mano alzada y recorta al rectángulo del trazo.
+     * Se recorta por el trazo (no por el contenido) para que todos los fotogramas de una animación
+     * queden del mismo tamaño.
+     */
+    fun lassoCut(src: Bitmap, points: List<PointF>): Bitmap = lassoCut(EditImage.single(src), points).first
+
+    fun lassoCut(img: EditImage, points: List<PointF>): EditImage {
+        if (points.size < 3) return img
         val path = Path().apply {
             moveTo(points[0].x, points[0].y)
             for (i in 1 until points.size) lineTo(points[i].x, points[i].y)
             close()
         }
-        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(out)
+        val bounds = RectF().also { path.computeBounds(it, true) }
+        val l = floor(bounds.left).toInt().coerceIn(0, img.width - 1)
+        val t = floor(bounds.top).toInt().coerceIn(0, img.height - 1)
+        val r = ceil(bounds.right).toInt().coerceIn(l + 1, img.width)
+        val b = ceil(bounds.bottom).toInt().coerceIn(t + 1, img.height)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
-        canvas.drawPath(path, paint)
-        paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
-        canvas.drawBitmap(src, 0f, 0f, paint)
-        return trimTransparent(out)
+        val srcIn = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN) }
+        return img.map { frame ->
+            val out = Bitmap.createBitmap(r - l, b - t, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(out)
+            canvas.translate(-l.toFloat(), -t.toFloat())
+            canvas.drawPath(path, paint)
+            canvas.drawBitmap(frame, 0f, 0f, srcIn)
+            out
+        }
     }
 
     /** Borra (hace transparente) un trazo de pincel. */
@@ -84,28 +102,42 @@ object StickerProcessor {
 
     /** Elimina los bordes totalmente transparentes. */
     fun trimTransparent(src: Bitmap, alphaThreshold: Int = 8): Bitmap {
-        val w = src.width
-        val h = src.height
+        val b = opaqueBounds(listOf(src), alphaThreshold) ?: return src
+        if (b.left == 0 && b.top == 0 && b.right == src.width && b.bottom == src.height) return src
+        return Bitmap.createBitmap(src, b.left, b.top, b.width(), b.height())
+    }
+
+    /** Recorta todos los fotogramas al rectángulo que contiene el contenido de cualquiera de ellos. */
+    fun trimTransparent(img: EditImage): EditImage {
+        val b = opaqueBounds(img.frames) ?: return img
+        if (b.left == 0 && b.top == 0 && b.right == img.width && b.bottom == img.height) return img
+        return img.map { Bitmap.createBitmap(it, b.left, b.top, b.width(), b.height()) }
+    }
+
+    /** Unión de las zonas no transparentes de todos los fotogramas (null si todo es transparente). */
+    fun opaqueBounds(frames: List<Bitmap>, alphaThreshold: Int = 8): Rect? {
+        val w = frames[0].width
+        val h = frames[0].height
         val px = IntArray(w * h)
-        src.getPixels(px, 0, w, 0, 0, w, h)
         var minX = w
         var minY = h
         var maxX = -1
         var maxY = -1
-        for (y in 0 until h) {
-            val row = y * w
-            for (x in 0 until w) {
-                if ((px[row + x] ushr 24) > alphaThreshold) {
-                    if (x < minX) minX = x
-                    if (x > maxX) maxX = x
-                    if (y < minY) minY = y
-                    if (y > maxY) maxY = y
+        for (f in frames) {
+            f.getPixels(px, 0, w, 0, 0, w, h)
+            for (y in 0 until h) {
+                val row = y * w
+                for (x in 0 until w) {
+                    if ((px[row + x] ushr 24) > alphaThreshold) {
+                        if (x < minX) minX = x
+                        if (x > maxX) maxX = x
+                        if (y < minY) minY = y
+                        if (y > maxY) maxY = y
+                    }
                 }
             }
         }
-        if (maxX < 0) return src // completamente transparente
-        if (minX == 0 && minY == 0 && maxX == w - 1 && maxY == h - 1) return src
-        return Bitmap.createBitmap(src, minX, minY, maxX - minX + 1, maxY - minY + 1)
+        return if (maxX < 0) null else Rect(minX, minY, maxX + 1, maxY + 1)
     }
 
     // ---------------- Borde ----------------
@@ -211,22 +243,27 @@ object StickerProcessor {
      * Genera el sticker definitivo de 512x512: recorta transparencias, escala para que quepa con
      * margen y, si se indica, dibuja el borde.
      */
-    fun composeSticker(src: Bitmap, borderColor: Int?, borderWidth: Int): Bitmap {
+    fun composeSticker(src: Bitmap, borderColor: Int?, borderWidth: Int): Bitmap =
+        composeFrames(listOf(src), borderColor, borderWidth)[0]
+
+    /** Igual que [composeSticker] pero para todos los fotogramas, con el mismo encuadre. */
+    fun composeFrames(frames: List<Bitmap>, borderColor: Int?, borderWidth: Int): List<Bitmap> {
         val size = StickerLimits.STICKER_SIZE
-        val trimmed = trimTransparent(src)
+        val bounds = opaqueBounds(frames) ?: Rect(0, 0, frames[0].width, frames[0].height)
         val bw = if (borderColor != null) borderWidth.coerceIn(0, 48) else 0
         val available = (size - 2 * MARGIN - 2 * bw).toFloat()
-        val scale = available / max(trimmed.width, trimmed.height)
-        val tw = max(1, (trimmed.width * scale).roundToInt())
-        val th = max(1, (trimmed.height * scale).roundToInt())
-        var content = Bitmap.createScaledBitmap(trimmed, tw, th, true)
-        if (bw > 0 && borderColor != null) content = addOutline(content, borderColor, bw)
-
-        val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val left = (size - content.width) / 2f
-        val top = (size - content.height) / 2f
-        Canvas(out).drawBitmap(content, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
-        return out
+        val scale = available / max(bounds.width(), bounds.height())
+        val tw = max(1, (bounds.width() * scale).roundToInt())
+        val th = max(1, (bounds.height() * scale).roundToInt())
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+        return frames.map { frame ->
+            val trimmed = Bitmap.createBitmap(frame, bounds.left, bounds.top, bounds.width(), bounds.height())
+            var content = Bitmap.createScaledBitmap(trimmed, tw, th, true)
+            if (bw > 0 && borderColor != null) content = addOutline(content, borderColor, bw)
+            val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+            Canvas(out).drawBitmap(content, (size - content.width) / 2f, (size - content.height) / 2f, paint)
+            out
+        }
     }
 
     /** Ajusta una imagen cualquiera a 512x512 sin margen extra (para importar stickers ya hechos). */

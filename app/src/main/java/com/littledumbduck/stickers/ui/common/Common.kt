@@ -20,6 +20,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -102,11 +103,14 @@ fun PackInfoDialog(
     initialName: String = "",
     initialPublisher: String = "",
     confirmText: String = "Guardar",
+    /** Muestra la opción de paquete animado (solo al crear: luego no se puede cambiar). */
+    askAnimated: Boolean = false,
     onDismiss: () -> Unit,
-    onConfirm: (name: String, publisher: String) -> Unit,
+    onConfirm: (name: String, publisher: String, animated: Boolean) -> Unit,
 ) {
     var name by rememberSaveable { mutableStateOf(initialName) }
     var publisher by rememberSaveable { mutableStateOf(initialPublisher) }
+    var animated by rememberSaveable { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -124,12 +128,28 @@ fun PackInfoDialog(
                     label = { Text("Autor") },
                     singleLine = true,
                 )
+                if (askAnimated) {
+                    Row(
+                        Modifier.fillMaxWidth().clickable { animated = !animated },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Paquete animado")
+                            Text(
+                                "Para GIF, vídeos y stickers animados. WhatsApp no permite mezclar animados y estáticos.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = animated, onCheckedChange = { animated = it })
+                    }
+                }
             }
         },
         confirmButton = {
             TextButton(
                 enabled = name.isNotBlank() && publisher.isNotBlank(),
-                onClick = { onConfirm(name, publisher) },
+                onClick = { onConfirm(name, publisher, animated) },
             ) { Text(confirmText) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
@@ -210,8 +230,9 @@ fun PackPickerDialog(
                         Column(Modifier.padding(start = 12.dp)) {
                             Text(p.name)
                             Text(
-                                if (p.isFull) "Lleno (${p.stickers.size}/${StickerLimits.MAX_STICKERS})"
-                                else "${p.stickers.size}/${StickerLimits.MAX_STICKERS} stickers",
+                                (if (p.animated) "Animado · " else "") +
+                                    if (p.isFull) "Lleno (${p.stickers.size}/${StickerLimits.MAX_STICKERS})"
+                                    else "${p.stickers.size}/${StickerLimits.MAX_STICKERS} stickers",
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }

@@ -300,12 +300,13 @@ fun WhatsAppStickersContent(
             PackInfoDialog(
                 title = "Nuevo paquete",
                 confirmText = "Crear",
+                askAnimated = true,
                 onDismiss = { showCreatePack = false; pending = null },
-                onConfirm = { name, publisher ->
+                onConfirm = { name, publisher, animated ->
                     showCreatePack = false
                     pending = null
                     scope.launch {
-                        val pack = withContext(Dispatchers.IO) { repo.createPack(name, publisher) }
+                        val pack = withContext(Dispatchers.IO) { repo.createPack(name, publisher, animated) }
                         runAction(pack.identifier, action)
                     }
                 },

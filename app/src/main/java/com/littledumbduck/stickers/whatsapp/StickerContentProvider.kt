@@ -81,7 +81,7 @@ class StickerContentProvider : ContentProvider() {
                 .add("")
                 .add(p.imageDataVersion.toString())
                 .add(0)
-                .add(0)
+                .add(if (p.animated) 1 else 0)
         }
         return c
     }

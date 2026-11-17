@@ -36,6 +36,11 @@ import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.ZoomOutMap
+import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -106,18 +111,31 @@ fun EditorScreen(
     val context = LocalContext.current
     LaunchedEffect(packId, sourceUri, stickerFile) { vm.load(packId, sourceUri, stickerFile) }
 
-    val bitmap = vm.bitmap
+    val img = vm.image
     val snackbar = remember { SnackbarHostState() }
     var showSave by remember { mutableStateOf(false) }
     var confirmExit by remember { mutableStateOf(false) }
     var eraserDp by remember { mutableStateOf(28f) }
     var preview by remember { mutableStateOf<Bitmap?>(null) }
+    val view = remember { ViewTransform() }
+
+    // Reproducción de animaciones (se pausa en la pestaña Borde para mostrar la vista previa)
+    var frameIndex by remember(img) { mutableIntStateOf(0) }
+    var userPlaying by remember { mutableStateOf(true) }
+    val playing = img != null && img.isAnimated && userPlaying && vm.tool != EditorTool.BORDER
+    LaunchedEffect(img, playing) {
+        val anim = img ?: return@LaunchedEffect
+        while (playing) {
+            delay(anim.durations[frameIndex].coerceAtLeast(20).toLong())
+            frameIndex = (frameIndex + 1) % anim.frames.size
+        }
+    }
 
     // Estado de las herramientas (se reinicia cuando cambia la imagen)
-    val cropRect = remember(bitmap) {
-        mutableStateOf(Rect(0f, 0f, (bitmap?.width ?: 1).toFloat(), (bitmap?.height ?: 1).toFloat()))
+    val cropRect = remember(img) {
+        mutableStateOf(Rect(0f, 0f, (img?.width ?: 1).toFloat(), (img?.height ?: 1).toFloat()))
     }
-    val lasso = remember(bitmap) { mutableStateListOf<Offset>() }
+    val lasso = remember(img) { mutableStateListOf<Offset>() }
 
     LaunchedEffect(vm.message) {
         vm.message?.let {
@@ -132,10 +150,10 @@ fun EditorScreen(
         }
     }
     // Vista previa final (con borde) cuando se está en la pestaña Borde
-    LaunchedEffect(bitmap, vm.borderColor, vm.borderWidth, vm.tool) {
+    LaunchedEffect(img, vm.borderColor, vm.borderWidth, vm.tool, frameIndex) {
         if (vm.tool != EditorTool.BORDER) return@LaunchedEffect
         delay(60) // pequeño "debounce" mientras se arrastra el control deslizante
-        preview = vm.renderPreview()
+        preview = vm.renderPreview(frameIndex)
     }
 
     BackHandler { if (vm.canUndo) confirmExit = true else onClose() }
@@ -151,16 +169,24 @@ fun EditorScreen(
                     }
                 },
                 actions = {
+                    if (img?.isAnimated == true) {
+                        IconButton(onClick = { userPlaying = !userPlaying }) {
+                            Icon(
+                                if (userPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                if (userPlaying) "Pausar" else "Reproducir",
+                            )
+                        }
+                    }
                     IconButton(onClick = vm::undo, enabled = vm.canUndo) {
                         Icon(Icons.AutoMirrored.Filled.Undo, "Deshacer")
                     }
-                    IconButton(onClick = vm::rotate, enabled = bitmap != null) {
+                    IconButton(onClick = vm::rotate, enabled = img != null) {
                         Icon(Icons.Default.RotateRight, "Girar")
                     }
-                    IconButton(onClick = vm::flip, enabled = bitmap != null) {
+                    IconButton(onClick = vm::flip, enabled = img != null) {
                         Icon(Icons.Default.Flip, "Voltear")
                     }
-                    IconButton(onClick = { showSave = true }, enabled = bitmap != null && vm.busyMessage == null) {
+                    IconButton(onClick = { showSave = true }, enabled = img != null && vm.busyMessage == null) {
                         Icon(Icons.Default.Check, "Guardar")
                     }
                 },
@@ -173,15 +199,15 @@ fun EditorScreen(
                         ToolPanel(
                             vm = vm,
                             cropRect = cropRect.value,
-                            imageSize = bitmap?.let { it.width to it.height },
+                            imageSize = img?.let { it.width to it.height },
                             lassoPoints = lasso.size,
                             eraserDp = eraserDp,
                             onEraserDp = { eraserDp = it },
                             onResetCrop = {
-                                bitmap?.let { cropRect.value = Rect(0f, 0f, it.width.toFloat(), it.height.toFloat()) }
+                                img?.let { cropRect.value = Rect(0f, 0f, it.width.toFloat(), it.height.toFloat()) }
                             },
                             onSquareCrop = {
-                                bitmap?.let {
+                                img?.let {
                                     val r = cropRect.value
                                     val side = minOf(r.width, r.height)
                                     val c = r.center
@@ -193,11 +219,13 @@ fun EditorScreen(
                             onApplyCrop = {
                                 val r = cropRect.value
                                 vm.applyCrop(r.left, r.top, r.right, r.bottom)
+                                view.reset()
                             },
                             onClearLasso = { lasso.clear() },
                             onApplyLasso = {
                                 vm.applyLasso(lasso.map { PointF(it.x, it.y) })
                                 lasso.clear()
+                                view.reset()
                             },
                         )
                     }
@@ -221,12 +249,13 @@ fun EditorScreen(
         ) {
             val density = LocalDensity.current
             val showPreview = vm.tool == EditorTool.BORDER && preview != null
-            val shown = if (showPreview) preview else bitmap
+            val shown = if (showPreview) preview else img?.frames?.getOrNull(frameIndex)
             if (shown != null) {
                 val image = remember(shown) { shown.asImageBitmap() }
                 EditorCanvas(
                     image = image,
                     tool = vm.tool,
+                    view = view,
                     cropRect = cropRect,
                     lasso = lasso,
                     eraserSizePx = with(density) { eraserDp.dp.toPx() },
@@ -235,11 +264,36 @@ fun EditorScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+
+            // Avisos superiores: animación y tipo de paquete
+            Column(
+                Modifier.align(Alignment.TopCenter).padding(8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (img != null && img.isAnimated) {
+                    InfoChip(
+                        if (vm.animatedPack) "Animado · ${img.frames.size} fotogramas · ${"%.1f".format(img.durations.sum() / 1000f)} s"
+                        else "Este paquete es estático: se guardará el primer fotograma"
+                    )
+                } else if (img != null && vm.animatedPack) {
+                    InfoChip("Paquete animado: la imagen se guardará como animación fija")
+                }
+            }
+
+            if (view.isZoomed) {
+                SmallFloatingActionButton(
+                    onClick = view::reset,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
+                ) { Icon(Icons.Default.ZoomOutMap, "Ajustar a la pantalla") }
+            }
+
             vm.busyMessage?.let { msg ->
                 Surface(
                     shape = MaterialTheme.shapes.large,
                     tonalElevation = 6.dp,
                     shadowElevation = 6.dp,
+                    modifier = Modifier.padding(24.dp),
                 ) {
                     Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(Modifier.size(28.dp))
@@ -273,6 +327,17 @@ fun EditorScreen(
 }
 
 @Composable
+private fun InfoChip(text: String) {
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.85f),
+        contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+    ) {
+        Text(text, Modifier.padding(horizontal = 10.dp, vertical = 4.dp), style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
 private fun ToolPanel(
     vm: EditorViewModel,
     cropRect: Rect,
@@ -289,7 +354,7 @@ private fun ToolPanel(
     val busy = vm.busyMessage != null
     when (vm.tool) {
         EditorTool.CROP -> Column {
-            Hint("Arrastra las esquinas o mueve el recuadro.")
+            Hint("Arrastra las esquinas o mueve el recuadro. Pellizca con dos dedos para ampliar.")
             val isFull = imageSize != null && cropRect.left <= 0f && cropRect.top <= 0f &&
                 cropRect.right >= imageSize.first && cropRect.bottom >= imageSize.second
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -300,7 +365,7 @@ private fun ToolPanel(
             }
         }
         EditorTool.LASSO -> Column {
-            Hint("Rodea con el dedo la parte que quieres conservar. Se cerrará sola al soltar.")
+            Hint("Rodea con el dedo la parte que quieres conservar (se cierra sola al soltar). Usa dos dedos para ampliar y moverte.")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onClearLasso, enabled = lassoPoints > 0) { Text("Borrar trazo") }
                 Spacer(Modifier.weight(1f))
@@ -308,7 +373,11 @@ private fun ToolPanel(
             }
         }
         EditorTool.SMART -> Column {
-            Hint("Detecta automáticamente a la persona, animal u objeto principal y elimina el fondo. Funciona sin conexión una vez descargado el modelo.")
+            Hint(
+                "Detecta automáticamente a la persona, animal u objeto principal y elimina el fondo" +
+                    (if (vm.image?.isAnimated == true && vm.animatedPack) " de cada fotograma" else "") +
+                    ". Sin servicios de Google Play o sin conexión usa un modo integrado que detecta personas."
+            )
             Button(
                 onClick = vm::applySmartCutout,
                 enabled = !busy,
@@ -319,7 +388,7 @@ private fun ToolPanel(
             }
         }
         EditorTool.ERASE -> Column {
-            Hint("Pasa el dedo por las zonas que quieras borrar. Usa Deshacer si te equivocas.")
+            Hint("Pasa el dedo por las zonas que quieras borrar. Amplía con dos dedos para retocar detalles.")
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Pincel", style = MaterialTheme.typography.labelLarge)
                 Slider(

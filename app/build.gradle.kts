@@ -64,9 +64,13 @@ dependencies {
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("io.coil-kt:coil-gif:2.7.0") // reproducir stickers animados en las listas
 
     // Recorte inteligente (segmentación de sujeto en el dispositivo)
     implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
+    implementation("com.google.android.gms:play-services-base:18.5.0")
+    // Alternativa sin servicios de Google Play: modelo de personas incluido en la app
+    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
 
     testImplementation("junit:junit:4.13.2")

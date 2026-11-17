@@ -3,7 +3,6 @@ package com.littledumbduck.stickers.data
 import android.content.Context
 import android.net.Uri
 import com.littledumbduck.stickers.image.ImageLoader
-import com.littledumbduck.stickers.image.StickerProcessor
 
 /** Importa imágenes que ya son stickers (p. ej. los de WhatsApp) sin pasar por el editor. */
 object StickerImporter {
@@ -22,12 +21,29 @@ object StickerImporter {
                 continue
             }
             runCatching {
-                val bmp = ImageLoader.load(context, uri, StickerLimits.STICKER_SIZE)
-                val sticker = StickerProcessor.fitTo512(bmp)
+                if (pack.animated) {
+                    // Si ya cumple los requisitos de WhatsApp se copia sin recomprimir (sin pérdida)
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    if (bytes != null && StickerBuilder.isValidAnimatedSticker(bytes)) {
+                        repo.putSticker(
+                            packId = packId,
+                            webp = bytes,
+                            source = bytes,
+                            sourceExtension = "webp",
+                            emojis = listOf(DEFAULT_EMOJI),
+                            borderColor = null,
+                            borderWidth = 0,
+                        )
+                        return@runCatching
+                    }
+                }
+                val img = ImageLoader.loadEditable(context, uri, allowAnimation = pack.animated)
+                val out = StickerBuilder.build(img, pack.animated, null, 0, alreadyFinal = true)
                 repo.putSticker(
                     packId = packId,
-                    webp = StickerProcessor.encodeWebp(sticker),
-                    sourcePng = StickerProcessor.encodePng(bmp),
+                    webp = out.webp,
+                    source = out.source,
+                    sourceExtension = out.sourceExtension,
                     emojis = listOf(DEFAULT_EMOJI),
                     borderColor = null,
                     borderWidth = 0,
