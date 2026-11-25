@@ -26,6 +26,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.max
+import kotlin.math.min
+
+data class SeekRequest(val ms: Long, val precise: Boolean, val id: Int)
 
 enum class EditorTool(val label: String) {
     TRIM("Duración"),
@@ -94,6 +98,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     val trimDirty get() = clip != null && (trimStart != appliedStart || trimEnd != appliedEnd)
+
+    // ---- Vista previa de la fuente completa en "Duración" ----
+
+    /** Posición (ms) de la vista previa del vídeo/GIF completo. */
+    var previewPos by mutableLongStateOf(0L)
+        private set
+    var previewPlaying by mutableStateOf(true)
+
+    /** true: se ve el vídeo entero; false: se repite solo el tramo elegido. */
+    var previewWhole by mutableStateOf(true)
+        private set
+
+    /** Petición de salto en el reproductor (el contador permite repetir el mismo instante). */
+    var seekRequest by mutableStateOf<SeekRequest?>(null)
+        private set
+    private var seekCounter = 0
+    private var lastScrubT: Long? = null
+
+    /** Se está arrastrando un tirador de la línea de tiempo. */
+    var scrubbing by mutableStateOf(false)
+        private set
 
     /** Fotograma que se previsualiza mientras se arrastra en la línea de tiempo. */
     var scrubFrame by mutableStateOf<Bitmap?>(null)
@@ -200,7 +225,63 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Pide (de forma asíncrona) el fotograma del instante [t] para la vista previa; null la quita. */
     fun scrubTo(t: Long?) {
+        // Al soltar un tirador, la vista previa salta a ese instante
+        if (t == null) lastScrubT?.let { seekPreview(it) }
+        lastScrubT = t
+        scrubbing = t != null
         scrubRequests.value = t
+    }
+
+    /** Salta a [ms] en la vista previa. [precise] = buscar el fotograma exacto (más lento en vídeo). */
+    fun seekPreview(ms: Long, precise: Boolean = true) {
+        val dur = clip?.durationMs ?: return
+        val t = ms.coerceIn(0L, max(0L, dur - 1))
+        previewPos = t
+        seekRequest = SeekRequest(t, precise, ++seekCounter)
+    }
+
+    fun choosePreviewWhole(whole: Boolean) {
+        previewWhole = whole
+        if (!whole && (previewPos < trimStart || previewPos >= trimEnd)) seekPreview(trimStart)
+    }
+
+    /** Posición informada por el reproductor de vídeo. */
+    fun onVideoPosition(ms: Long) {
+        previewPos = ms
+        if (!previewWhole && previewPlaying && ms >= trimEnd) seekPreview(trimStart)
+    }
+
+    /** Avance de la vista previa de GIF/animaciones (sin reproductor del sistema). */
+    fun advancePreview(dtMs: Long) {
+        val dur = clip?.durationMs ?: return
+        val (from, to) = if (previewWhole) 0L to dur else trimStart to trimEnd
+        var p = previewPos + dtMs
+        if (p >= to || p < from) p = from
+        previewPos = p
+    }
+
+    /** Usa la posición actual como inicio del tramo, conservando su duración si cabe. */
+    fun markStart() {
+        val c = clip ?: return
+        val dur = c.durationMs
+        val minLen = min(ClipSource.MIN_CLIP_MS, dur)
+        val len = (trimEnd - trimStart).coerceIn(minLen, ClipSource.MAX_CLIP_MS)
+        val s = c.snap(previewPos).coerceIn(0L, dur - minLen)
+        var e = trimEnd
+        if (e < s + minLen || e - s > ClipSource.MAX_CLIP_MS) e = min(dur, s + len)
+        setTrim(s, e)
+    }
+
+    /** Usa la posición actual como final del tramo, conservando su duración si cabe. */
+    fun markEnd() {
+        val c = clip ?: return
+        val dur = c.durationMs
+        val minLen = min(ClipSource.MIN_CLIP_MS, dur)
+        val len = (trimEnd - trimStart).coerceIn(minLen, ClipSource.MAX_CLIP_MS)
+        val e = if (previewPos >= dur - c.frameStepMs) dur else max(previewPos, minLen).coerceAtMost(dur)
+        var s = trimStart
+        if (e < s + minLen || e - s > ClipSource.MAX_CLIP_MS) s = max(0L, e - len)
+        setTrim(s, e)
     }
 
     suspend fun thumbnail(t: Long, maxDim: Int): Bitmap? {

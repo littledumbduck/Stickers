@@ -57,8 +57,10 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
-/** "1,25 s" con el separador decimal del idioma del móvil. */
-fun formatSeconds(ms: Long): String = String.format(Locale.getDefault(), "%.2f s", ms / 1000f)
+/** "1,25 s" (o "2:05,30" a partir de un minuto) con el separador decimal del idioma del móvil. */
+fun formatSeconds(ms: Long): String =
+    if (ms < 60_000) String.format(Locale.getDefault(), "%.2f s", ms / 1000f)
+    else String.format(Locale.getDefault(), "%d:%05.2f", ms / 60_000, (ms % 60_000) / 1000f)
 
 /** Miniaturas de la línea de tiempo, indexadas por instante para poder usar la más cercana. */
 @Stable
@@ -339,10 +341,13 @@ fun TrimTimeline(
                 )
             }
 
-            // Cabezal de reproducción
+            // Cabezal de reproducción (en toda la tira: se ve el vídeo entero)
             if (playheadMs != null && dragging == null) {
                 val xp = xOf(playheadMs.toFloat())
-                if (xp in xs..xe) drawLine(Color.White, Offset(xp, 0f), Offset(xp, h), 2.dp.toPx())
+                if (xp in insetPx..(insetPx + w)) {
+                    drawLine(Color.Black.copy(alpha = 0.5f), Offset(xp, 0f), Offset(xp, h), 4.dp.toPx())
+                    drawLine(Color.White, Offset(xp, 0f), Offset(xp, h), 2.dp.toPx())
+                }
             }
         }
     }

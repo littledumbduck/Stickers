@@ -32,6 +32,12 @@ import androidx.compose.material.icons.filled.BorderOuter
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.FirstPage
+import androidx.compose.material.icons.filled.LastPage
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material3.FilterChip
+import kotlin.math.max
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.Gesture
@@ -82,6 +88,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.littledumbduck.stickers.image.ClipSource
+import com.littledumbduck.stickers.image.ImageLoader
+import androidx.compose.runtime.withFrameMillis
 import com.littledumbduck.stickers.ui.common.parseEmojis
 import kotlinx.coroutines.delay
 import android.graphics.Color as AColor
@@ -134,6 +142,27 @@ fun EditorScreen(
         }
     }
 
+    // ---- "Duración": vista previa de la fuente completa (vídeo, GIF o animación) ----
+    val clip = vm.clip
+    val trimMode = vm.tool == EditorTool.TRIM && clip != null
+    var muted by remember { mutableStateOf(false) }
+    var sourceFrame by remember(clip) { mutableStateOf<Bitmap?>(null) }
+    val framePlayback = trimMode && clip?.videoUri == null
+    // GIF / animación: se avanza con el reloj de pantalla y se pide el fotograma de cada instante
+    LaunchedEffect(framePlayback, vm.previewPlaying, vm.scrubbing) {
+        if (!framePlayback || !vm.previewPlaying || vm.scrubbing) return@LaunchedEffect
+        var last = withFrameMillis { it }
+        while (true) {
+            val now = withFrameMillis { it }
+            vm.advancePreview(now - last)
+            last = now
+        }
+    }
+    val frameKey = if (framePlayback) clip?.snap(vm.previewPos) else null
+    LaunchedEffect(frameKey) {
+        if (frameKey != null) vm.thumbnail(frameKey, ImageLoader.MAX_ANIMATED_DIMENSION)?.let { sourceFrame = it }
+    }
+
     // Estado de las herramientas (se reinicia cuando cambia la imagen)
     val cropRect = remember(img) {
         mutableStateOf(Rect(0f, 0f, (img?.width ?: 1).toFloat(), (img?.height ?: 1).toFloat()))
@@ -178,11 +207,14 @@ fun EditorScreen(
                     }
                 },
                 actions = {
-                    if (img?.isAnimated == true) {
-                        IconButton(onClick = { userPlaying = !userPlaying }) {
+                    if (img?.isAnimated == true || trimMode) {
+                        val isPlaying = if (trimMode) vm.previewPlaying else userPlaying
+                        IconButton(onClick = {
+                            if (trimMode) vm.previewPlaying = !vm.previewPlaying else userPlaying = !userPlaying
+                        }) {
                             Icon(
-                                if (userPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                if (userPlaying) "Pausar" else "Reproducir",
+                                if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                if (isPlaying) "Pausar" else "Reproducir",
                             )
                         }
                     }
@@ -207,9 +239,8 @@ fun EditorScreen(
                     Box(Modifier.fillMaxWidth().heightIn(min = 112.dp).padding(horizontal = 16.dp, vertical = 10.dp)) {
                         ToolPanel(
                             vm = vm,
-                            playheadMs = img?.takeIf { it.isAnimated && !vm.trimDirty }?.let {
-                                vm.appliedStart + it.durations.take(frameIndex).sum()
-                            },
+                            muted = muted,
+                            onToggleMute = { muted = !muted },
                             cropRect = cropRect.value,
                             imageSize = img?.let { it.width to it.height },
                             lassoPoints = lasso.size,
@@ -263,9 +294,24 @@ fun EditorScreen(
             val density = LocalDensity.current
             val showPreview = vm.tool == EditorTool.BORDER && preview != null
             // En "Duración", mientras se arrastra se ve en grande el fotograma exacto del tirador
-            val scrub = vm.scrubFrame.takeIf { vm.tool == EditorTool.TRIM }
+            val scrub = vm.scrubFrame.takeIf { trimMode && vm.scrubbing }
+            val videoUri = clip?.videoUri
+            if (trimMode && videoUri != null) {
+                VideoPreview(
+                    uri = videoUri,
+                    aspect = clip.aspect,
+                    playing = vm.previewPlaying && !vm.scrubbing,
+                    muted = muted,
+                    seek = vm.seekRequest,
+                    initialPositionMs = vm.previewPos,
+                    onPosition = vm::onVideoPosition,
+                    modifier = Modifier.fillMaxSize().padding(20.dp),
+                )
+            }
             val shown = when {
                 scrub != null -> scrub
+                trimMode && videoUri != null -> null // lo muestra el reproductor
+                trimMode -> sourceFrame
                 showPreview -> preview
                 else -> img?.frames?.getOrNull(frameIndex)
             }
@@ -290,12 +336,16 @@ fun EditorScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (vm.tool == EditorTool.TRIM && vm.clip != null) {
+                if (trimMode) {
                     InfoChip(
-                        if (vm.scrubFrame != null) "Vista previa del fotograma"
-                        else if (vm.trimDirty) "Tramo nuevo sin aplicar: pulsa Aplicar o cambia de herramienta"
-                        else "Reproduciendo el tramo elegido"
+                        when {
+                            vm.scrubbing -> "Fotograma exacto del tirador"
+                            vm.previewWhole -> (if (clip!!.videoUri != null) "Vídeo completo" else "Clip completo") +
+                                " · ${formatSeconds(vm.previewPos)} de ${formatSeconds(clip.durationMs)}"
+                            else -> "Repitiendo el tramo elegido"
+                        }
                     )
+                    if (vm.trimDirty) InfoChip("Tramo nuevo sin aplicar: pulsa Aplicar o cambia de herramienta")
                 } else if (img != null && img.isAnimated) {
                     InfoChip(
                         if (vm.animatedPack) "Animado · ${img.frames.size} fotogramas · ${"%.1f".format(img.durations.sum() / 1000f)} s"
@@ -365,7 +415,8 @@ private fun InfoChip(text: String) {
 @Composable
 private fun ToolPanel(
     vm: EditorViewModel,
-    playheadMs: Long?,
+    muted: Boolean,
+    onToggleMute: () -> Unit,
     cropRect: Rect,
     imageSize: Pair<Int, Int>?,
     lassoPoints: Int,
@@ -379,7 +430,7 @@ private fun ToolPanel(
 ) {
     val busy = vm.busyMessage != null
     when (vm.tool) {
-        EditorTool.TRIM -> vm.clip?.let { clip -> TrimPanel(vm, clip, playheadMs) }
+        EditorTool.TRIM -> vm.clip?.let { clip -> TrimPanel(vm, clip, muted, onToggleMute) }
         EditorTool.CROP -> Column {
             Hint("Arrastra las esquinas o mueve el recuadro. Pellizca con dos dedos para ampliar.")
             val isFull = imageSize != null && cropRect.left <= 0f && cropRect.top <= 0f &&
@@ -535,11 +586,61 @@ private fun SaveDialog(initial: List<String>, onDismiss: () -> Unit, onSave: (Li
 private val QUICK_EMOJIS = listOf("😀", "😂", "😍", "😢", "😡", "👍", "❤️")
 
 @Composable
-private fun TrimPanel(vm: EditorViewModel, clip: ClipSource, playheadMs: Long?) {
+private fun TrimPanel(vm: EditorViewModel, clip: ClipSource, muted: Boolean, onToggleMute: () -> Unit) {
     val busy = vm.busyMessage != null
+    val dur = clip.durationMs
     Column {
+        // Barra de reproducción del vídeo/GIF completo
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { vm.previewPlaying = !vm.previewPlaying }) {
+                Icon(
+                    if (vm.previewPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    if (vm.previewPlaying) "Pausar" else "Reproducir",
+                )
+            }
+            var dragging by remember { mutableStateOf<Float?>(null) }
+            Slider(
+                value = dragging ?: (vm.previewPos.toFloat() / max(1L, dur)),
+                onValueChange = {
+                    dragging = it
+                    vm.seekPreview((it * dur).toLong(), precise = false)
+                },
+                onValueChangeFinished = {
+                    dragging?.let { vm.seekPreview((it * dur).toLong(), precise = true) }
+                    dragging = null
+                },
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                "${formatSeconds(vm.previewPos)} / ${formatSeconds(dur)}",
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
+            if (clip.videoUri != null) {
+                IconButton(onClick = onToggleMute) {
+                    Icon(
+                        if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        if (muted) "Activar sonido" else "Silenciar",
+                    )
+                }
+            }
+        }
+        // Marcar inicio/fin en el punto que se está viendo
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(onClick = vm::markStart, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Default.FirstPage, null, Modifier.size(18.dp))
+                Text("Inicio aquí", Modifier.padding(start = 4.dp), maxLines = 1)
+            }
+            OutlinedButton(onClick = vm::markEnd, modifier = Modifier.weight(1f)) {
+                Text("Fin aquí", Modifier.padding(end = 4.dp), maxLines = 1)
+                Icon(Icons.Default.LastPage, null, Modifier.size(18.dp))
+            }
+        }
         TrimTimeline(
-            durationMs = clip.durationMs,
+            durationMs = dur,
             start = vm.trimStart,
             end = vm.trimEnd,
             aspect = clip.aspect,
@@ -548,7 +649,7 @@ private fun TrimPanel(vm: EditorViewModel, clip: ClipSource, playheadMs: Long?) 
             thumbnail = vm::thumbnail,
             onRangeChange = vm::setTrim,
             onScrub = vm::scrubTo,
-            playheadMs = playheadMs,
+            playheadMs = vm.previewPos,
             minLengthMs = ClipSource.MIN_CLIP_MS,
             maxLengthMs = ClipSource.MAX_CLIP_MS,
             modifier = Modifier.fillMaxWidth(),
@@ -563,13 +664,25 @@ private fun TrimPanel(vm: EditorViewModel, clip: ClipSource, playheadMs: Long?) 
                     style = MaterialTheme.typography.labelLarge,
                 )
                 Text(
-                    "Duración ${formatSeconds(vm.trimEnd - vm.trimStart)} de ${formatSeconds(clip.durationMs)} · máx. 10 s",
+                    "Tramo de ${formatSeconds(vm.trimEnd - vm.trimStart)} · máx. 10 s",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             TextButton(onClick = vm::resetTrim, enabled = vm.trimDirty && !busy) { Text("Deshacer") }
             Button(onClick = vm::applyTrim, enabled = vm.trimDirty && !busy) { Text("Aplicar") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = vm.previewWhole,
+                onClick = { vm.choosePreviewWhole(true) },
+                label = { Text(if (clip.videoUri != null) "Ver vídeo entero" else "Ver todo") },
+            )
+            FilterChip(
+                selected = !vm.previewWhole,
+                onClick = { vm.choosePreviewWhole(false) },
+                label = { Text("Repetir el tramo") },
+            )
         }
     }
 }

@@ -39,6 +39,9 @@ abstract class ClipSource : Closeable {
     /** Fotogramas del tramo [startMs, endMs) a tamaño de edición. */
     abstract fun extract(startMs: Long, endMs: Long): EditImage
 
+    /** Si la fuente es un vídeo, su URI para reproducirlo entero con el reproductor del sistema. */
+    open val videoUri: Uri? get() = null
+
     /** Tramo inicial propuesto al abrir el clip. */
     open fun defaultRange(): Pair<Long, Long> = 0L to min(durationMs, MAX_CLIP_MS)
 
@@ -77,8 +80,10 @@ abstract class ClipSource : Closeable {
 }
 
 /** Vídeo leído con [MediaMetadataRetriever]. */
-class VideoClip(context: Context, uri: Uri) : ClipSource() {
+class VideoClip(context: Context, private val uri: Uri) : ClipSource() {
     private val retriever = MediaMetadataRetriever().apply { setDataSource(context, uri) }
+
+    override val videoUri: Uri get() = uri
 
     override val durationMs: Long =
         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L

@@ -15,8 +15,8 @@ android {
         applicationId = appId
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
 
         // Solo ARM (móviles reales). x86/x86_64 son para emuladores y duplican ~40 MB de ML Kit.
         ndk {

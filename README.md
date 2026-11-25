@@ -23,6 +23,9 @@ App Android (Kotlin + Jetpack Compose) para crear, editar y gestionar paquetes d
     mientras arrastras subes el dedo, la línea de tiempo se amplía alrededor del tirador (cada
     ~40 dp duplica el zoom) para ajustar fotograma a fotograma, y el fotograma exacto se ve en grande.
     Las ediciones ya hechas (recorte, lazo, fondo, borrador…) se vuelven a aplicar al tramo nuevo.
+    La vista previa reproduce el vídeo/GIF **entero** (con sonido, barra de posición y cabezal en la
+    línea de tiempo) y tiene botones *Inicio aquí* / *Fin aquí* para marcar el instante que se está
+    viendo; también se puede repetir solo el tramo elegido.
   - **Recortar**: recuadro con esquinas arrastrables, opción cuadrada.
   - **Lazo**: recorte a mano alzada trazando con el dedo.
   - **Inteligente**: quita el fondo automáticamente en el dispositivo. Usa ML Kit Subject
