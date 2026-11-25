@@ -17,6 +17,11 @@ App Android (Kotlin + Jetpack Compose) para crear, editar y gestionar paquetes d
   códec de contenedor (`image/WebpCodec.kt`).
 - **Enviar a WhatsApp / WhatsApp Business** con el diálogo oficial. La app detecta si el paquete ya
   está añadido y, al editarlo, incrementa `image_data_version` para que WhatsApp se actualice.
+- **Vídeos de TikTok sin marca de agua**: pega el enlace (o usa *Compartir* en TikTok y elige
+  esta app) y el vídeo se descarga sin marca de agua y se abre en el editor. Usa la dirección del
+  reproductor web de TikTok (`playAddr`), que no lleva marca de agua, igual que yt-dlp; si TikTok
+  solo ofrece la versión marcada, se descarga esa y se avisa. Se conecta solo a TikTok, sin
+  servicios de terceros. Prueba real: `TIKTOK_LIVE_URL=<enlace> ./gradlew testDebugUnitTest`.
 - **Editor de imagen**:
   - **Duración** (vídeos, GIF y animaciones): línea de tiempo con miniaturas para elegir de qué
     segundo a qué segundo va el sticker (máx. 10 s). Arrastra los extremos o el tramo entero; si

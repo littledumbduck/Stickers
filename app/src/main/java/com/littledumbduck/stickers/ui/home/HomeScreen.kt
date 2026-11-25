@@ -21,6 +21,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.outlined.Collections
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -66,6 +68,7 @@ import java.io.File
 fun HomeScreen(
     onOpenPack: (String) -> Unit,
     onEditImage: (packId: String, uri: Uri) -> Unit,
+    onFromTikTok: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val repo = remember { PackRepository.get(context) }
@@ -91,7 +94,15 @@ fun HomeScreen(
     Scaffold(
         topBar = {
             Column {
-                TopAppBar(title = { Text("Gestor de Stickers") })
+                TopAppBar(
+                    title = { Text("Gestor de Stickers") },
+                    actions = {
+                        TextButton(onClick = onFromTikTok) {
+                            Icon(Icons.Default.Download, null, Modifier.size(18.dp))
+                            Text("TikTok", Modifier.padding(start = 4.dp))
+                        }
+                    },
+                )
                 TabRow(selectedTabIndex = tab) {
                     Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Mis paquetes") })
                     Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("De WhatsApp") })

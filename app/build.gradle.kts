@@ -15,8 +15,8 @@ android {
         applicationId = appId
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
 
         // Solo ARM (móviles reales). x86/x86_64 son para emuladores y duplican ~40 MB de ML Kit.
         ndk {
@@ -62,6 +62,8 @@ android {
         unitTests.isIncludeAndroidResources = true
         unitTests.all { test ->
             test.systemProperty("robolectric.pixelCopyRenderMode", "hardware")
+            // Prueba real contra TikTok solo si se pasa un enlace: TIKTOK_LIVE_URL=https://...
+            System.getenv("TIKTOK_LIVE_URL")?.let { test.systemProperty("tiktokLiveUrl", it) }
             System.getenv("SNAPSHOT_DIR")?.let { test.systemProperty("snapshotDir", it) }
         }
     }

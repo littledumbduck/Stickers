@@ -36,6 +36,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Image
@@ -94,6 +95,7 @@ fun PackDetailScreen(
     onNewSticker: (Uri) -> Unit,
     onEditSticker: (fileName: String) -> Unit,
     onImportFromWhatsApp: () -> Unit,
+    onImportFromTikTok: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val repo = remember { PackRepository.get(context) }
@@ -263,6 +265,26 @@ fun PackDetailScreen(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(Icons.Outlined.Collections, null, tint = MaterialTheme.colorScheme.primary)
                             Text("De WhatsApp", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+                if (pack.animated) {
+                    item {
+                        Box(
+                            Modifier
+                                .aspectRatio(1f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .border(
+                                    BorderStroke(2.dp, MaterialTheme.colorScheme.outlineVariant),
+                                    RoundedCornerShape(14.dp),
+                                )
+                                .clickable(onClick = onImportFromTikTok),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Default.Download, null, tint = MaterialTheme.colorScheme.primary)
+                                Text("De TikTok", style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                 }

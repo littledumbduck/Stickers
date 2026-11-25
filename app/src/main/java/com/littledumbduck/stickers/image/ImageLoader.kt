@@ -31,8 +31,7 @@ object ImageLoader {
                 return clip.extract(start, end)
             }
         }
-        val mime = context.contentResolver.getType(uri).orEmpty()
-        if (mime.startsWith("video/")) {
+        if (ClipSource.isVideo(context, uri)) {
             return VideoClip(context, uri).use { EditImage.single(it.frameAt(0, MAX_EDIT_DIMENSION)) }
         }
         return EditImage.single(load(context, uri))

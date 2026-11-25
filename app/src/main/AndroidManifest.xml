@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Para descargar vídeos de TikTok -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Visibilidad de paquetes (Android 11+) para detectar WhatsApp y consultar su proveedor
          que indica si un paquete ya está añadido. -->
     <queries>
@@ -28,6 +31,12 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- "Compartir" un enlace desde TikTok (o cualquier app) hacia esta -->
+            <intent-filter android:label="Crear sticker">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 

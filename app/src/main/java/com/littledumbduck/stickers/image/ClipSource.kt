@@ -55,8 +55,7 @@ abstract class ClipSource : Closeable {
         /** Devuelve una fuente animada si [uri] es un vídeo, un GIF animado o un WebP animado. */
         fun open(context: Context, uri: Uri): ClipSource? {
             val resolver = context.contentResolver
-            val mime = resolver.getType(uri).orEmpty()
-            if (mime.startsWith("video/")) {
+            if (isVideo(context, uri)) {
                 return runCatching { VideoClip(context, uri) }.getOrNull()?.takeIf { it.durationMs > 0 }
             }
             val header = resolver.openInputStream(uri)?.use { s -> ByteArray(16).also { s.read(it) } } ?: return null
@@ -71,6 +70,21 @@ abstract class ClipSource : Closeable {
             } else {
                 GifClip.create(bytes)
             }
+        }
+
+        /**
+         * ¿Es un vídeo? Por tipo MIME o, si no lo hay (archivos propios como las descargas de
+         * TikTok), por la cabecera: caja "ftyp" de MP4/MOV o la firma de WebM/MKV.
+         */
+        fun isVideo(context: Context, uri: Uri): Boolean {
+            val mime = context.contentResolver.getType(uri).orEmpty()
+            if (mime.startsWith("video/")) return true
+            if (mime.isNotEmpty()) return false
+            val h = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { s -> ByteArray(12).also { s.read(it) } }
+            }.getOrNull() ?: return false
+            return String(h, 4, 4, Charsets.US_ASCII) == "ftyp" ||
+                (h[0] == 0x1A.toByte() && h[1] == 0x45.toByte() && h[2] == 0xDF.toByte() && h[3] == 0xA3.toByte())
         }
 
         /** Paso entre fotogramas al extraer un tramo: denso en clips cortos, sin pasar del máximo. */
