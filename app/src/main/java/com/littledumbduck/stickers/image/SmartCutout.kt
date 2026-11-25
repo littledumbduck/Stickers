@@ -33,11 +33,16 @@ object SmartCutout {
     suspend fun removeBackground(
         context: Context,
         image: EditImage,
+        /**
+         * Recortar el resultado al sujeto. Con false se conserva el tamaño original, necesario
+         * cuando la operación se vuelve a aplicar sobre otros fotogramas (cambio de duración).
+         */
+        trim: Boolean = true,
         onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
     ): Result {
         val frames = if (hasPlayServices(context)) {
             try {
-                return Result(finish(withSubjectSegmentation(context, image, onProgress)), usedFallback = false)
+                return Result(finish(withSubjectSegmentation(context, image, onProgress), trim), usedFallback = false)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: NoSubjectException) {
@@ -48,12 +53,12 @@ object SmartCutout {
         } else {
             withSelfieSegmentation(image, onProgress)
         }
-        return Result(finish(frames), usedFallback = true)
+        return Result(finish(frames, trim), usedFallback = true)
     }
 
-    private fun finish(image: EditImage): EditImage {
+    private fun finish(image: EditImage, trim: Boolean): EditImage {
         if (StickerProcessor.opaqueBounds(image.frames) == null) throw NoSubjectException()
-        return StickerProcessor.trimTransparent(image)
+        return if (trim) StickerProcessor.trimTransparent(image) else image
     }
 
     private fun hasPlayServices(context: Context) =

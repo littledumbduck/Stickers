@@ -18,6 +18,11 @@ App Android (Kotlin + Jetpack Compose) para crear, editar y gestionar paquetes d
 - **Enviar a WhatsApp / WhatsApp Business** con el diálogo oficial. La app detecta si el paquete ya
   está añadido y, al editarlo, incrementa `image_data_version` para que WhatsApp se actualice.
 - **Editor de imagen**:
+  - **Duración** (vídeos, GIF y animaciones): línea de tiempo con miniaturas para elegir de qué
+    segundo a qué segundo va el sticker (máx. 10 s). Arrastra los extremos o el tramo entero; si
+    mientras arrastras subes el dedo, la línea de tiempo se amplía alrededor del tirador (cada
+    ~40 dp duplica el zoom) para ajustar fotograma a fotograma, y el fotograma exacto se ve en grande.
+    Las ediciones ya hechas (recorte, lazo, fondo, borrador…) se vuelven a aplicar al tramo nuevo.
   - **Recortar**: recuadro con esquinas arrastrables, opción cuadrada.
   - **Lazo**: recorte a mano alzada trazando con el dedo.
   - **Inteligente**: quita el fondo automáticamente en el dispositivo. Usa ML Kit Subject
@@ -48,10 +53,11 @@ Requiere JDK 17+ y el Android SDK (API 35).
 
 ```bash
 ./gradlew assembleDebug          # APK en app/build/outputs/apk/debug/
-./gradlew testDebugUnitTest      # pruebas del procesado de imagen (Robolectric)
+./gradlew testDebugUnitTest      # pruebas de imagen, códec WebP, clips y línea de tiempo (Robolectric)
 ```
 
-Android 8.0 (API 26) o superior.
+Android 8.0 (API 26) o superior, móviles ARM. Los APK se firman con `app/debug.keystore` (clave de
+depuración, no apta para Play Store) para que cada versión nueva se instale como actualización.
 
 ## Estructura
 

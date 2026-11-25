@@ -15,11 +15,27 @@ android {
         applicationId = appId
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "1.2"
+
+        // Solo ARM (móviles reales). x86/x86_64 son para emuladores y duplican ~40 MB de ML Kit.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
 
         manifestPlaceholders["contentProviderAuthority"] = providerAuthority
         buildConfigField("String", "CONTENT_PROVIDER_AUTHORITY", "\"$providerAuthority\"")
+    }
+
+    // Misma firma en cualquier máquina, para que cada APK nuevo se instale como actualización
+    // sin borrar los paquetes. Es una clave de depuración (no sirve para publicar en Play Store).
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
@@ -44,6 +60,10 @@ android {
     }
     testOptions {
         unitTests.isIncludeAndroidResources = true
+        unitTests.all { test ->
+            test.systemProperty("robolectric.pixelCopyRenderMode", "hardware")
+            System.getenv("SNAPSHOT_DIR")?.let { test.systemProperty("snapshotDir", it) }
+        }
     }
 }
 
@@ -75,4 +95,6 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

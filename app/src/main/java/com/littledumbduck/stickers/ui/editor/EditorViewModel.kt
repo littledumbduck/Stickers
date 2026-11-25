@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.PointF
 import android.net.Uri
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
@@ -13,21 +14,39 @@ import androidx.lifecycle.viewModelScope
 import com.littledumbduck.stickers.data.PackRepository
 import com.littledumbduck.stickers.data.StickerBuilder
 import com.littledumbduck.stickers.data.StickerImporter
+import com.littledumbduck.stickers.image.ClipSource
 import com.littledumbduck.stickers.image.EditImage
+import com.littledumbduck.stickers.image.FramesClip
 import com.littledumbduck.stickers.image.ImageLoader
 import com.littledumbduck.stickers.image.SmartCutout
 import com.littledumbduck.stickers.image.StickerProcessor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class EditorTool(val label: String) {
+    TRIM("Duración"),
     CROP("Recortar"),
     LASSO("Lazo"),
-    SMART("Inteligente"),
-    ERASE("Borrador"),
+    SMART("Fondo"),
+    ERASE("Borrar"),
     BORDER("Borde"),
+}
+
+/**
+ * Operación del editor. Se guardan para poder volver a aplicarlas cuando cambia el tramo de un
+ * vídeo/GIF: los fotogramas nuevos tienen el mismo tamaño, así que las coordenadas siguen valiendo.
+ */
+private sealed interface EditOp {
+    data class Crop(val l: Float, val t: Float, val r: Float, val b: Float) : EditOp
+    class Lasso(val points: List<PointF>) : EditOp
+    class Erase(val points: List<PointF>, val width: Float) : EditOp
+    data object Rotate : EditOp
+    data object Flip : EditOp
+    data object Smart : EditOp
 }
 
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
@@ -45,6 +64,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     var tool by mutableStateOf(EditorTool.CROP)
+        private set
 
     /** null = sin borde. */
     var borderColor by mutableStateOf<Int?>(Color.WHITE)
@@ -55,12 +75,57 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var animatedPack by mutableStateOf(false)
         private set
 
-    private val history = ArrayDeque<EditImage>()
+    // ---------------- Clip (vídeo / GIF / WebP animado) ----------------
+
+    /** Fuente completa de la animación, para poder elegir otro tramo. null si la imagen es estática. */
+    var clip by mutableStateOf<ClipSource?>(null)
+        private set
+
+    /** Tramo elegido en la línea de tiempo (aún sin aplicar). */
+    var trimStart by mutableLongStateOf(0L)
+        private set
+    var trimEnd by mutableLongStateOf(0L)
+        private set
+
+    /** Tramo con el que se generaron los fotogramas actuales. */
+    var appliedStart by mutableLongStateOf(0L)
+        private set
+    var appliedEnd by mutableLongStateOf(0L)
+        private set
+
+    val trimDirty get() = clip != null && (trimStart != appliedStart || trimEnd != appliedEnd)
+
+    /** Fotograma que se previsualiza mientras se arrastra en la línea de tiempo. */
+    var scrubFrame by mutableStateOf<Bitmap?>(null)
+        private set
+    private val scrubRequests = MutableStateFlow<Long?>(null)
+
+    // ---------------- Historial ----------------
+
+    /** Fotogramas del tramo aplicado, antes de cualquier edición. */
+    private var baseImage: EditImage? = null
+    private val ops = ArrayList<EditOp>()
+
+    /** Imagen previa a cada operación (puede faltar si se liberó por memoria). */
+    private val history = ArrayDeque<Pair<Int, EditImage>>()
+
     private var loadedKey: String? = null
     private var packId: String = ""
     private var replaceFile: String? = null
 
     val isEditingExisting get() = replaceFile != null
+
+    init {
+        // Vista previa al arrastrar: siempre se atiende la última posición pedida
+        viewModelScope.launch {
+            scrubRequests.collectLatest { t ->
+                val c = clip
+                scrubFrame = if (t == null || c == null) null
+                else runCatching { withContext(Dispatchers.IO) { c.frameAt(t, ImageLoader.MAX_ANIMATED_DIMENSION) } }
+                    .getOrNull() ?: scrubFrame
+            }
+        }
+    }
 
     fun load(packId: String, source: Uri?, stickerFile: String?) {
         val key = "$packId|$source|$stickerFile"
@@ -79,49 +144,109 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (st.borderColor != null) borderWidth = st.borderWidth
                 val srcFile = st.sourceFile?.let { repo.file(packId, it) }?.takeIf { it.exists() }
                     ?: repo.file(packId, st.fileName)
-                image = withContext(Dispatchers.IO) { ImageLoader.loadEditable(ctx, srcFile, pack.animated) }
+                val img = withContext(Dispatchers.IO) { ImageLoader.loadEditable(ctx, srcFile, pack.animated) }
+                // Un sticker animado ya guardado también se puede acortar
+                if (img.isAnimated) openClip(FramesClip(img), wholeClip = true) else setBase(img)
                 tool = EditorTool.BORDER
             } else {
                 val uri = requireNotNull(source) { "No hay imagen" }
-                val img = withContext(Dispatchers.IO) { ImageLoader.loadEditable(ctx, uri, pack.animated) }
-                image = img
-                // Si la imagen ya tiene transparencia (p. ej. otro sticker) se va directamente al borde.
-                if (hasTransparentPixels(img.first)) tool = EditorTool.BORDER
-            }
-        }
-    }
-
-    // ---------------- Operaciones ----------------
-
-    fun applyCrop(left: Float, top: Float, right: Float, bottom: Float) = transform("Recortando…") { img ->
-        img.map { StickerProcessor.crop(it, left.toInt(), top.toInt(), right.toInt(), bottom.toInt()) }
-    }
-
-    fun applyLasso(points: List<PointF>) = transform("Recortando…") { StickerProcessor.lassoCut(it, points) }
-
-    fun applyErase(points: List<PointF>, width: Float) =
-        transform(if (image?.isAnimated == true) "Borrando…" else null) { img ->
-            img.map { StickerProcessor.erase(it, points, width) }
-        }
-
-    fun rotate() = transform(null) { it.map(StickerProcessor::rotate90) }
-
-    fun flip() = transform(null) { it.map(StickerProcessor::flipHorizontal) }
-
-    fun applySmartCutout() {
-        val src = image ?: return
-        if (busyMessage != null) return
-        runBusy("Detectando el sujeto…") {
-            val result = withContext(Dispatchers.Default) {
-                SmartCutout.removeBackground(getApplication(), src) { done, total ->
-                    if (total > 1) viewModelScope.launch {
-                        // Si ya terminó no se vuelve a mostrar el aviso
-                        if (busyMessage != null) busyMessage = "Quitando el fondo… fotograma ${done + 1} de $total"
-                    }
+                val newClip = if (pack.animated) withContext(Dispatchers.IO) { ClipSource.open(ctx, uri) } else null
+                if (newClip != null) {
+                    openClip(newClip, wholeClip = false)
+                    tool = EditorTool.TRIM
+                } else {
+                    val img = withContext(Dispatchers.IO) { ImageLoader.loadEditable(ctx, uri, pack.animated) }
+                    setBase(img)
+                    // Si la imagen ya tiene transparencia (p. ej. otro sticker) se va directamente al borde.
+                    if (hasTransparentPixels(img.first)) tool = EditorTool.BORDER
                 }
             }
-            push(result.image)
-            message = if (result.usedFallback) {
+        }
+    }
+
+    private suspend fun openClip(c: ClipSource, wholeClip: Boolean) {
+        clip = c
+        val (s, e) = if (wholeClip) 0L to c.durationMs else c.defaultRange()
+        trimStart = s
+        trimEnd = e
+        val base = withContext(Dispatchers.IO) { c.extract(s, e) }
+        appliedStart = s
+        appliedEnd = e
+        setBase(base)
+    }
+
+    private fun setBase(img: EditImage) {
+        baseImage = img
+        image = img
+        ops.clear()
+        history.clear()
+        canUndo = false
+    }
+
+    // ---------------- Herramientas ----------------
+
+    fun selectTool(t: EditorTool) {
+        // Al salir de "Duración" con un tramo nuevo sin aplicar, se aplica automáticamente
+        if (tool == EditorTool.TRIM && t != EditorTool.TRIM && trimDirty) applyTrim()
+        tool = t
+    }
+
+    fun setTrim(start: Long, end: Long) {
+        trimStart = start
+        trimEnd = end
+    }
+
+    fun resetTrim() = setTrim(appliedStart, appliedEnd)
+
+    /** Pide (de forma asíncrona) el fotograma del instante [t] para la vista previa; null la quita. */
+    fun scrubTo(t: Long?) {
+        scrubRequests.value = t
+    }
+
+    suspend fun thumbnail(t: Long, maxDim: Int): Bitmap? {
+        val c = clip ?: return null
+        return runCatching { withContext(Dispatchers.IO) { c.frameAt(t, maxDim) } }.getOrNull()
+    }
+
+    /** Extrae los fotogramas del tramo elegido y vuelve a aplicar todas las ediciones. */
+    fun applyTrim() {
+        if (!trimDirty || busyMessage != null) return
+        runBusy("Extrayendo fotogramas…") { applyTrimNow() }
+    }
+
+    private suspend fun applyTrimNow() {
+        val c = clip ?: return
+        val s = trimStart
+        val e = trimEnd
+        val base = withContext(Dispatchers.IO) { c.extract(s, e) }
+        val edited = replay(base, ops)
+        baseImage = base
+        appliedStart = s
+        appliedEnd = e
+        history.clear() // las imágenes guardadas eran de otro tramo; se rehacen si se deshace
+        image = edited
+    }
+
+    fun applyCrop(left: Float, top: Float, right: Float, bottom: Float) =
+        perform(EditOp.Crop(left, top, right, bottom), "Recortando…")
+
+    fun applyLasso(points: List<PointF>) = perform(EditOp.Lasso(points), "Recortando…")
+
+    fun applyErase(points: List<PointF>, width: Float) =
+        perform(EditOp.Erase(points, width), if (image?.isAnimated == true) "Borrando…" else null)
+
+    fun rotate() = perform(EditOp.Rotate, null)
+
+    fun flip() = perform(EditOp.Flip, null)
+
+    fun applySmartCutout() {
+        if (image == null || busyMessage != null) return
+        runBusy("Detectando el sujeto…") {
+            val before = image ?: return@runBusy
+            var fallback = false
+            val out = applyOp(before, EditOp.Smart) { fallback = it }
+            commit(EditOp.Smart, before, out)
+            message = if (fallback) {
                 "Fondo eliminado con el modo sin conexión (solo detecta personas). Retoca con el borrador o el lazo si hace falta."
             } else {
                 "Fondo eliminado. Puedes retocar con el borrador o el lazo."
@@ -130,9 +255,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun undo() {
-        val prev = history.removeLastOrNull() ?: return
-        image = prev
-        canUndo = history.isNotEmpty()
+        if (ops.isEmpty() || busyMessage != null) return
+        ops.removeAt(ops.lastIndex)
+        val cached = history.lastOrNull()?.takeIf { it.first == ops.size }
+        if (cached != null) {
+            history.removeLast()
+            image = cached.second
+            canUndo = ops.isNotEmpty()
+        } else {
+            // No queda copia en memoria: se rehace desde los fotogramas originales
+            runBusy("Deshaciendo…") {
+                image = replay(requireNotNull(baseImage), ops)
+                canUndo = ops.isNotEmpty()
+            }
+        }
     }
 
     /** Vista previa final de 512x512 con el borde elegido (del fotograma indicado). */
@@ -152,12 +288,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun save(onDone: () -> Unit) {
-        val img = image ?: return
+        if (image == null) return
         val color = borderColor
         val width = borderWidth
         val emo = emojis
         val animated = animatedPack
-        runBusy(if (img.isAnimated && animated) "Generando sticker animado…" else "Guardando sticker…") {
+        runBusy(if (animated && clip != null) "Generando sticker animado…" else "Guardando sticker…") {
+            if (trimDirty) applyTrimNow()
+            val img = image ?: return@runBusy
             withContext(Dispatchers.Default) {
                 val out = StickerBuilder.build(img, animated, color, width)
                 withContext(Dispatchers.IO) {
@@ -177,15 +315,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    override fun onCleared() {
+        clip?.close()
+    }
+
     // ---------------- Internos ----------------
 
-    private fun transform(busy: String?, op: (EditImage) -> EditImage) {
+    private fun perform(op: EditOp, busy: String?) {
         val src = image ?: return
         if (busyMessage != null) return
-        val block: suspend () -> Unit = {
-            val out = withContext(Dispatchers.Default) { op(src) }
-            if (out !== src) push(out)
-        }
+        val block: suspend () -> Unit = { commit(op, src, applyOp(src, op)) }
         if (busy != null) {
             runBusy(busy, block = block)
         } else {
@@ -201,15 +340,45 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Guarda el estado anterior para deshacer, sin superar un presupuesto de memoria. */
-    private fun push(newImage: EditImage) {
-        image?.let { history.addLast(it) }
-        var total = history.sumOf { it.byteCount } + newImage.byteCount
-        while (history.isNotEmpty() && (history.size > MAX_HISTORY || total > MAX_HISTORY_BYTES)) {
-            total -= history.removeFirst().byteCount
+    private suspend fun applyOp(img: EditImage, op: EditOp, onFallback: (Boolean) -> Unit = {}): EditImage =
+        when (op) {
+            is EditOp.Crop -> withContext(Dispatchers.Default) {
+                img.map { StickerProcessor.crop(it, op.l.toInt(), op.t.toInt(), op.r.toInt(), op.b.toInt()) }
+            }
+            is EditOp.Lasso -> withContext(Dispatchers.Default) { StickerProcessor.lassoCut(img, op.points) }
+            is EditOp.Erase -> withContext(Dispatchers.Default) {
+                img.map { StickerProcessor.erase(it, op.points, op.width) }
+            }
+            EditOp.Rotate -> withContext(Dispatchers.Default) { img.map(StickerProcessor::rotate90) }
+            EditOp.Flip -> withContext(Dispatchers.Default) { img.map(StickerProcessor::flipHorizontal) }
+            EditOp.Smart -> withContext(Dispatchers.Default) {
+                // Con clip no se recorta al sujeto, para poder repetir la operación en otro tramo
+                SmartCutout.removeBackground(getApplication(), img, trim = clip == null) { done, total ->
+                    if (total > 1) viewModelScope.launch {
+                        // Si ya terminó no se vuelve a mostrar el aviso
+                        if (busyMessage != null) busyMessage = "Quitando el fondo… fotograma ${done + 1} de $total"
+                    }
+                }
+            }.also { onFallback(it.usedFallback) }.image
         }
-        image = newImage
-        canUndo = history.isNotEmpty()
+
+    private suspend fun replay(base: EditImage, list: List<EditOp>): EditImage {
+        var img = base
+        for (op in list) img = applyOp(img, op)
+        return img
+    }
+
+    /** Registra la operación y guarda el estado anterior para deshacer, con un presupuesto de memoria. */
+    private fun commit(op: EditOp, before: EditImage, after: EditImage) {
+        if (after === before) return
+        history.addLast(ops.size to before)
+        ops += op
+        var total = history.sumOf { it.second.byteCount } + after.byteCount
+        while (history.isNotEmpty() && (history.size > MAX_HISTORY || total > MAX_HISTORY_BYTES)) {
+            total -= history.removeFirst().second.byteCount
+        }
+        image = after
+        canUndo = true
     }
 
     private fun runBusy(

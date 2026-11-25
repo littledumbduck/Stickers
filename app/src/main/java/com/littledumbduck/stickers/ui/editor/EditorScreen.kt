@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.AutoFixOff
 import androidx.compose.material.icons.filled.BorderOuter
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.Gesture
@@ -80,6 +81,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.littledumbduck.stickers.image.ClipSource
 import com.littledumbduck.stickers.ui.common.parseEmojis
 import kotlinx.coroutines.delay
 import android.graphics.Color as AColor
@@ -91,6 +93,7 @@ private val BORDER_COLORS = listOf(
 )
 
 private fun EditorTool.icon(): ImageVector = when (this) {
+    EditorTool.TRIM -> Icons.Default.ContentCut
     EditorTool.CROP -> Icons.Default.Crop
     EditorTool.LASSO -> Icons.Default.Gesture
     EditorTool.SMART -> Icons.Default.AutoAwesome
@@ -162,7 +165,13 @@ fun EditorScreen(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
-                title = { Text(if (vm.isEditingExisting) "Editar sticker" else "Nuevo sticker") },
+                title = {
+                    Text(
+                        if (vm.isEditingExisting) "Editar" else "Nuevo",
+                        maxLines = 1,
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = { if (vm.canUndo) confirmExit = true else onClose() }) {
                         Icon(Icons.Default.Close, "Cerrar")
@@ -198,6 +207,9 @@ fun EditorScreen(
                     Box(Modifier.fillMaxWidth().heightIn(min = 112.dp).padding(horizontal = 16.dp, vertical = 10.dp)) {
                         ToolPanel(
                             vm = vm,
+                            playheadMs = img?.takeIf { it.isAnimated && !vm.trimDirty }?.let {
+                                vm.appliedStart + it.durations.take(frameIndex).sum()
+                            },
                             cropRect = cropRect.value,
                             imageSize = img?.let { it.width to it.height },
                             lassoPoints = lasso.size,
@@ -231,12 +243,13 @@ fun EditorScreen(
                     }
                 }
                 NavigationBar {
-                    EditorTool.entries.forEach { t ->
+                    // "Duración" solo existe para vídeos, GIF y animaciones
+                    EditorTool.entries.filter { it != EditorTool.TRIM || vm.clip != null }.forEach { t ->
                         NavigationBarItem(
                             selected = vm.tool == t,
-                            onClick = { vm.tool = t },
+                            onClick = { vm.selectTool(t) },
                             icon = { Icon(t.icon(), null) },
-                            label = { Text(t.label) },
+                            label = { Text(t.label, maxLines = 1) },
                         )
                     }
                 }
@@ -249,7 +262,13 @@ fun EditorScreen(
         ) {
             val density = LocalDensity.current
             val showPreview = vm.tool == EditorTool.BORDER && preview != null
-            val shown = if (showPreview) preview else img?.frames?.getOrNull(frameIndex)
+            // En "Duración", mientras se arrastra se ve en grande el fotograma exacto del tirador
+            val scrub = vm.scrubFrame.takeIf { vm.tool == EditorTool.TRIM }
+            val shown = when {
+                scrub != null -> scrub
+                showPreview -> preview
+                else -> img?.frames?.getOrNull(frameIndex)
+            }
             if (shown != null) {
                 val image = remember(shown) { shown.asImageBitmap() }
                 EditorCanvas(
@@ -271,7 +290,13 @@ fun EditorScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (img != null && img.isAnimated) {
+                if (vm.tool == EditorTool.TRIM && vm.clip != null) {
+                    InfoChip(
+                        if (vm.scrubFrame != null) "Vista previa del fotograma"
+                        else if (vm.trimDirty) "Tramo nuevo sin aplicar: pulsa Aplicar o cambia de herramienta"
+                        else "Reproduciendo el tramo elegido"
+                    )
+                } else if (img != null && img.isAnimated) {
                     InfoChip(
                         if (vm.animatedPack) "Animado · ${img.frames.size} fotogramas · ${"%.1f".format(img.durations.sum() / 1000f)} s"
                         else "Este paquete es estático: se guardará el primer fotograma"
@@ -340,6 +365,7 @@ private fun InfoChip(text: String) {
 @Composable
 private fun ToolPanel(
     vm: EditorViewModel,
+    playheadMs: Long?,
     cropRect: Rect,
     imageSize: Pair<Int, Int>?,
     lassoPoints: Int,
@@ -353,6 +379,7 @@ private fun ToolPanel(
 ) {
     val busy = vm.busyMessage != null
     when (vm.tool) {
+        EditorTool.TRIM -> vm.clip?.let { clip -> TrimPanel(vm, clip, playheadMs) }
         EditorTool.CROP -> Column {
             Hint("Arrastra las esquinas o mueve el recuadro. Pellizca con dos dedos para ampliar.")
             val isFull = imageSize != null && cropRect.left <= 0f && cropRect.top <= 0f &&
@@ -506,3 +533,43 @@ private fun SaveDialog(initial: List<String>, onDismiss: () -> Unit, onSave: (Li
 }
 
 private val QUICK_EMOJIS = listOf("😀", "😂", "😍", "😢", "😡", "👍", "❤️")
+
+@Composable
+private fun TrimPanel(vm: EditorViewModel, clip: ClipSource, playheadMs: Long?) {
+    val busy = vm.busyMessage != null
+    Column {
+        TrimTimeline(
+            durationMs = clip.durationMs,
+            start = vm.trimStart,
+            end = vm.trimEnd,
+            aspect = clip.aspect,
+            frameStepMs = clip.frameStepMs,
+            snap = clip::snap,
+            thumbnail = vm::thumbnail,
+            onRangeChange = vm::setTrim,
+            onScrub = vm::scrubTo,
+            playheadMs = playheadMs,
+            minLengthMs = ClipSource.MIN_CLIP_MS,
+            maxLengthMs = ClipSource.MAX_CLIP_MS,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "${formatSeconds(vm.trimStart)} → ${formatSeconds(vm.trimEnd)}",
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                Text(
+                    "Duración ${formatSeconds(vm.trimEnd - vm.trimStart)} de ${formatSeconds(clip.durationMs)} · máx. 10 s",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = vm::resetTrim, enabled = vm.trimDirty && !busy) { Text("Deshacer") }
+            Button(onClick = vm::applyTrim, enabled = vm.trimDirty && !busy) { Text("Aplicar") }
+        }
+    }
+}
