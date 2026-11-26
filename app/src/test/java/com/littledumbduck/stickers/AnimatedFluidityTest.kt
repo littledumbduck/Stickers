@@ -31,8 +31,10 @@ class AnimatedFluidityTest {
     private fun ball(i: Int, size: Int = 300): Bitmap {
         val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val c = Canvas(b)
-        c.drawRect(20f, 20f, 60f, 60f, Paint().apply { color = Color.BLUE }) // parte fija
-        c.drawCircle(60f + i * 4f, 150f, 30f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.RED })
+        // Con 300 px: cuadrado fijo en 20..60 y pelota de radio 30 en (60 + 4i, 150)
+        val u = size / 300f
+        c.drawRect(20 * u, 20 * u, 60 * u, 60 * u, Paint().apply { color = Color.BLUE }) // parte fija
+        c.drawCircle((60 + i * 4) * u, 150 * u, 30 * u, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.RED })
         return b
     }
 
