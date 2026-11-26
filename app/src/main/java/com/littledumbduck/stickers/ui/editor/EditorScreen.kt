@@ -38,6 +38,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.FilterChip
 import kotlin.math.max
+import kotlin.math.roundToInt
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.Gesture
@@ -348,7 +349,11 @@ fun EditorScreen(
                     if (vm.trimDirty) InfoChip("Tramo nuevo sin aplicar: pulsa Aplicar o cambia de herramienta")
                 } else if (img != null && img.isAnimated) {
                     InfoChip(
-                        if (vm.animatedPack) "Animado · ${img.frames.size} fotogramas · ${"%.1f".format(img.durations.sum() / 1000f)} s"
+                        if (vm.animatedPack) {
+                            val secs = img.durations.sum() / 1000f
+                            "Animado · ${img.frames.size} fotogramas · ${"%.1f".format(secs)} s · " +
+                                "${(img.frames.size / secs.coerceAtLeast(0.001f)).roundToInt()} fps"
+                        }
                         else "Este paquete es estático: se guardará el primer fotograma"
                     )
                 } else if (img != null && vm.animatedPack) {
@@ -390,6 +395,7 @@ fun EditorScreen(
             },
         )
     }
+    vm.pendingSave?.let { pending -> SizeWarningDialog(vm, pending) }
     if (confirmExit) {
         AlertDialog(
             onDismissRequest = { confirmExit = false },
@@ -399,6 +405,34 @@ fun EditorScreen(
             dismissButton = { TextButton(onClick = { confirmExit = false }) { Text("Seguir editando") } },
         )
     }
+}
+
+/** Aviso cuando el sticker animado no cabe en 500 KB sin perder fluidez o calidad. */
+@Composable
+private fun SizeWarningDialog(vm: EditorViewModel, pending: EditorViewModel.PendingSave) {
+    val r = pending.report
+    AlertDialog(
+        onDismissRequest = vm::discardPendingSave,
+        title = { Text(if (r.lostFluidity) "El sticker irá menos fluido" else "El sticker pierde calidad") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("WhatsApp limita los stickers animados a 500 KB. Para caber se ha quedado en:")
+                Text(r.summary(), style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Para que vaya más fluido: acorta el tramo en Duración, quita el fondo (lo que no se " +
+                        "mueve no ocupa) o recorta más ajustado al sujeto.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (r.canTradeQualityForFps) {
+                    TextButton(onClick = vm::retryPendingSmoother, modifier = Modifier.align(Alignment.End)) {
+                        Text("Más fluido (menos nitidez)")
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = vm::confirmPendingSave) { Text("Guardar así") } },
+        dismissButton = { TextButton(onClick = vm::discardPendingSave) { Text("Seguir editando") } },
+    )
 }
 
 @Composable

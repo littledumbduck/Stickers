@@ -248,6 +248,24 @@ object StickerProcessor {
 
     /** Igual que [composeSticker] pero para todos los fotogramas, con el mismo encuadre. */
     fun composeFrames(frames: List<Bitmap>, borderColor: Int?, borderWidth: Int): List<Bitmap> {
+        val c = composeAnimation(frames, borderColor, borderWidth)
+        val size = StickerLimits.STICKER_SIZE
+        return c.frames.map { content ->
+            val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+            Canvas(out).drawBitmap(content, c.placement.left.toFloat(), c.placement.top.toFloat(), null)
+            out
+        }
+    }
+
+    /** Fotogramas compuestos (solo la zona con contenido) y dónde van en el lienzo de 512x512. */
+    class Composed(val frames: List<Bitmap>, val placement: WebpCodec.Placement)
+
+    /**
+     * Como [composeFrames] pero sin pintar cada fotograma en un lienzo de 512x512: todos tienen el
+     * mismo tamaño y van en la misma posición, así que basta con guardar la zona con contenido.
+     * Ahorra memoria en animaciones con muchos fotogramas.
+     */
+    fun composeAnimation(frames: List<Bitmap>, borderColor: Int?, borderWidth: Int): Composed {
         val size = StickerLimits.STICKER_SIZE
         val bounds = opaqueBounds(frames) ?: Rect(0, 0, frames[0].width, frames[0].height)
         val bw = if (borderColor != null) borderWidth.coerceIn(0, 48) else 0
@@ -255,15 +273,17 @@ object StickerProcessor {
         val scale = available / max(bounds.width(), bounds.height())
         val tw = max(1, (bounds.width() * scale).roundToInt())
         val th = max(1, (bounds.height() * scale).roundToInt())
-        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-        return frames.map { frame ->
+        val out = frames.map { frame ->
             val trimmed = Bitmap.createBitmap(frame, bounds.left, bounds.top, bounds.width(), bounds.height())
-            var content = Bitmap.createScaledBitmap(trimmed, tw, th, true)
-            if (bw > 0 && borderColor != null) content = addOutline(content, borderColor, bw)
-            val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-            Canvas(out).drawBitmap(content, (size - content.width) / 2f, (size - content.height) / 2f, paint)
-            out
+            val content = Bitmap.createScaledBitmap(trimmed, tw, th, true)
+            if (bw > 0 && borderColor != null) addOutline(content, borderColor, bw) else content
         }
+        val cw = out[0].width
+        val ch = out[0].height
+        // Posición entera y par (los fotogramas parciales del WebP empiezan en coordenadas pares)
+        val left = ((size - cw) / 2) and 1.inv()
+        val top = ((size - ch) / 2) and 1.inv()
+        return Composed(out, WebpCodec.Placement(size, size, left, top))
     }
 
     /** Ajusta una imagen cualquiera a 512x512 sin margen extra (para importar stickers ya hechos). */

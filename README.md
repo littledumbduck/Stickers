@@ -15,6 +15,13 @@ App Android (Kotlin + Jetpack Compose) para crear, editar y gestionar paquetes d
   recomprimir). Todas las herramientas del editor se aplican a cada fotograma. Android no sabe leer
   ni escribir WebP animado fotograma a fotograma, así que la app incluye su propio
   códec de contenedor (`image/WebpCodec.kt`).
+- **Fluidez**: los vídeos y GIF se extraen a los fps del original, hasta 30 fps (los vídeos se
+  decodifican seguidos, por tandas, para que sea rápido). El número de fotogramas solo se limita
+  por la memoria del móvil. Al guardar, cada fotograma solo almacena la zona que cambia respecto
+  al anterior (como libwebp), así que lo que no se mueve no ocupa. Para caber en los 500 KB de
+  WhatsApp se busca primero el **máximo de fps** con una calidad aceptable y luego la mejor
+  calidad con esos fps. Si aun así hay que quitar fotogramas o bajar mucho la calidad, se avisa
+  antes de guardar, con consejos y la opción *Más fluido (menos nitidez)*.
 - **Enviar a WhatsApp / WhatsApp Business** con el diálogo oficial. La app detecta si el paquete ya
   está añadido y, al editarlo, incrementa `image_data_version` para que WhatsApp se actualice.
 - **Vídeos de TikTok sin marca de agua**: pega el enlace (o usa *Compartir* en TikTok y elige

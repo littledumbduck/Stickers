@@ -3,14 +3,19 @@ package com.littledumbduck.stickers.image
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.graphics.Movie
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import androidx.annotation.RequiresApi
 import java.io.Closeable
+import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 /**
  * Fuente animada (vídeo, GIF o WebP animado) de la que se puede ver cualquier instante y extraer
@@ -65,7 +70,8 @@ abstract class ClipSource : Closeable {
             if (!isWebp && !isGif) return null
             val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
             return if (isWebp) {
-                WebpCodec.decodeAnimated(bytes, ImageLoader.MAX_ANIMATED_DIMENSION, ImageLoader.MAX_ANIMATED_FRAMES)
+                val dim = ImageLoader.MAX_ANIMATED_DIMENSION
+                WebpCodec.decodeAnimated(bytes, dim, ImageLoader.maxAnimatedFrames(dim, dim))
                     ?.takeIf { it.isAnimated }?.let { FramesClip(it) }
             } else {
                 GifClip.create(bytes)
@@ -87,9 +93,37 @@ abstract class ClipSource : Closeable {
                 (h[0] == 0x1A.toByte() && h[1] == 0x45.toByte() && h[2] == 0xDF.toByte() && h[3] == 0xA3.toByte())
         }
 
-        /** Paso entre fotogramas al extraer un tramo: denso en clips cortos, sin pasar del máximo. */
-        internal fun extractStep(lengthMs: Long, minStepMs: Long) =
-            max(minStepMs, (lengthMs + ImageLoader.MAX_ANIMATED_FRAMES - 1) / ImageLoader.MAX_ANIMATED_FRAMES)
+        /**
+         * Instantes que se extraen del tramo [startMs, endMs): uno por fotograma de la fuente (cada
+         * [sourceStepMs]) hasta [ImageLoader.TARGET_FPS], repartidos por igual y sin pasar de
+         * [maxFrames] (si no caben, se reparten menos a lo largo de todo el tramo).
+         */
+        internal fun sampleTimes(startMs: Long, endMs: Long, sourceStepMs: Double, maxFrames: Int): LongArray {
+            val len = max(1L, endMs - startMs)
+            val step = max(sourceStepMs, 1000.0 / ImageLoader.TARGET_FPS)
+            // Pequeño margen para que 1000 ms a 33,3 ms por fotograma den 30 y no 31
+            val n = ceil(len / step - 1e-3).toInt().coerceIn(1, max(1, maxFrames))
+            return LongArray(n) { startMs + (it * len.toDouble() / n).roundToLong() }
+        }
+
+        /** Duración de cada fotograma: hasta el instante del siguiente (el último, hasta [endMs]). */
+        internal fun durationsFor(times: LongArray, endMs: Long): List<Int> =
+            times.indices.map { i -> max(1L, (if (i + 1 < times.size) times[i + 1] else endMs) - times[i]).toInt() }
+
+        /** Une fotogramas consecutivos idénticos sumando su duración (p. ej. un GIF de pocos fps). */
+        internal fun mergeRepeated(frames: List<Bitmap>, durations: List<Int>): EditImage {
+            val fs = ArrayList<Bitmap>(frames.size)
+            val ds = ArrayList<Int>(frames.size)
+            for (i in frames.indices) {
+                if (fs.isNotEmpty() && fs.last().sameAs(frames[i])) {
+                    ds[ds.lastIndex] += durations[i]
+                } else {
+                    fs += frames[i]
+                    ds += durations[i]
+                }
+            }
+            return EditImage(fs, ds)
+        }
     }
 }
 
@@ -102,18 +136,31 @@ class VideoClip(context: Context, private val uri: Uri) : ClipSource() {
     override val durationMs: Long =
         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
 
-    override val frameStepMs: Long = run {
-        val count = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toLongOrNull()
+    /** Número de fotogramas (solo Android 9+; null si el vídeo no lo indica). */
+    private val frameCount: Int? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull()
+                ?.takeIf { it > 0 }
         } else null
-        if (count != null && count > 0) (durationMs / count).coerceIn(10, 200) else 33L
-    }
 
-    override val aspect: Float = run {
-        val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toFloatOrNull() ?: 1f
-        val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toFloatOrNull() ?: 1f
-        val rot = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
-        if (rot % 180 != 0) h / w else w / h
+    /** Duración exacta de un fotograma (33,3 ms a 30 fps). Sin dato, se asume 30 fps. */
+    private val exactStepMs: Double =
+        frameCount?.let { (durationMs.toDouble() / it).coerceIn(4.0, 200.0) } ?: (1000.0 / 30)
+
+    override val frameStepMs: Long = exactStepMs.toLong().coerceIn(10, 200)
+
+    private val codedWidth = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 1
+    private val codedHeight = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 1
+    private val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+
+    override val aspect: Float =
+        if (rotation % 180 != 0) codedHeight.toFloat() / codedWidth else codedWidth.toFloat() / codedHeight
+
+    /** Tamaño (ya girado) de los fotogramas extraídos para editar. */
+    private val editSize: Pair<Int, Int> = run {
+        val (dw, dh) = if (rotation % 180 != 0) codedHeight to codedWidth else codedWidth to codedHeight
+        val s = min(1f, ImageLoader.MAX_ANIMATED_DIMENSION.toFloat() / max(dw, dh))
+        max(1, (dw * s).roundToInt()) to max(1, (dh * s).roundToInt())
     }
 
     /** Los vídeos suelen ser largos: se propone empezar con 5 s. */
@@ -130,19 +177,111 @@ class VideoClip(context: Context, private val uri: Uri) : ClipSource() {
         return argb(bmp)
     }
 
+    @Synchronized
     override fun extract(startMs: Long, endMs: Long): EditImage {
-        val len = max(1, endMs - startMs)
-        val step = extractStep(len, 100)
-        val frames = mutableListOf<Bitmap>()
-        val durations = mutableListOf<Int>()
-        var t = startMs
-        while (t < endMs) {
-            frames += frameAt(t, ImageLoader.MAX_ANIMATED_DIMENSION)
-            durations += min(step, endMs - t).toInt()
-            t += step
-        }
-        return EditImage(frames, durations)
+        val (w, h) = editSize
+        val times = sampleTimes(startMs, endMs, exactStepMs, ImageLoader.maxAnimatedFrames(w, h))
+        val frames = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching { extractSequential(times) }.getOrNull()
+        } else null
+        return EditImage(frames ?: times.map { frameAt(it, ImageLoader.MAX_ANIMATED_DIMENSION) }, durationsFor(times, endMs))
     }
+
+    /**
+     * Decodifica los fotogramas seguidos, por tandas, con getFramesAtIndex. Pedirlos uno a uno por
+     * tiempo obliga a buscar el fotograma clave anterior y decodificar desde ahí cada vez, lo que
+     * con decenas de fotogramas por segundo es muy lento. Devuelve null si no se puede (y se usa el
+     * método lento).
+     */
+    @RequiresApi(Build.VERSION_CODES.P)
+    private fun extractSequential(times: LongArray): List<Bitmap>? {
+        val count = frameCount ?: return null
+        if (count < 2 || times.isEmpty()) return null
+        val indices = IntArray(times.size) { (times[it] / exactStepMs).toInt().coerceIn(0, count - 1) }
+        // Tandas limitadas por memoria: cada fotograma llega a resolución completa
+        val rawBytes = max(1L, codedWidth.toLong() * codedHeight * 4)
+        val budget = min(64L shl 20, Runtime.getRuntime().maxMemory() / 8)
+        val batchMax = (budget / rawBytes).toInt().coerceIn(1, 16)
+        val params = MediaMetadataRetriever.BitmapParams().apply { preferredConfig = Bitmap.Config.ARGB_8888 }
+        val (w, h) = editSize
+        val out = ArrayList<Bitmap>(times.size)
+        var turn: Int? = null // giro que hay que aplicar (se comprueba con el primer fotograma)
+        var p = 0
+        while (p < indices.size) {
+            val first = indices[p]
+            var q = p
+            while (q + 1 < indices.size && indices[q + 1] - first < batchMax) q++
+            val n = indices[q] - first + 1
+            val batch = retriever.getFramesAtIndex(first, n, params)
+            try {
+                if (batch.size != n) return null
+                if (turn == null) turn = detectTurn(batch[0], times[0]) ?: return null
+                for (k in p..q) out += fitFrame(batch[indices[k] - first], turn, w, h)
+            } finally {
+                batch.forEach { it.recycle() }
+            }
+            p = q + 1
+        }
+        return out
+    }
+
+    /**
+     * Giro (0/90/180/270) que necesitan los fotogramas de getFramesAtIndex para verse como los de
+     * getFrameAtTime, comparando miniaturas del primero. null si no se parecen con ningún giro
+     * (el índice no corresponde al instante, p. ej. vídeos de velocidad variable).
+     */
+    private fun detectTurn(raw: Bitmap, timeMs: Long): Int? {
+        val ref = frameAt(timeMs, 32)
+        val rw = ref.width
+        val rh = ref.height
+        val refPx = IntArray(rw * rh).also { ref.getPixels(it, 0, rw, 0, 0, rw, rh) }
+        var best: Int? = null
+        var bestDiff = Double.MAX_VALUE
+        for (deg in intArrayOf(0, 90, 180, 270)) {
+            val sideways = deg % 180 != 0
+            val small = Bitmap.createScaledBitmap(raw, if (sideways) rh else rw, if (sideways) rw else rh, true)
+            val cand = rotate(small, deg)
+            if (cand.width != rw || cand.height != rh) continue
+            val px = IntArray(rw * rh).also { cand.getPixels(it, 0, rw, 0, 0, rw, rh) }
+            var sum = 0L
+            for (i in px.indices) {
+                val a = px[i]
+                val b = refPx[i]
+                sum += abs((a shr 16 and 0xFF) - (b shr 16 and 0xFF)) +
+                    abs((a shr 8 and 0xFF) - (b shr 8 and 0xFF)) + abs((a and 0xFF) - (b and 0xFF))
+            }
+            val diff = sum / (3.0 * px.size)
+            if (diff < bestDiff) {
+                bestDiff = diff
+                best = deg
+            }
+        }
+        return best?.takeIf { bestDiff < 24 }
+    }
+
+    /** Reduce (por mitades, para que no salga pixelado) y gira un fotograma a [w]x[h]. */
+    private fun fitFrame(raw: Bitmap, turn: Int, w: Int, h: Int): Bitmap {
+        val sideways = turn % 180 != 0
+        val tw = if (sideways) h else w
+        val th = if (sideways) w else h
+        var b = raw
+        while (b.width / 2 >= tw && b.height / 2 >= th) {
+            val half = Bitmap.createScaledBitmap(b, b.width / 2, b.height / 2, true)
+            if (b !== raw) b.recycle()
+            b = half
+        }
+        if (b.width != tw || b.height != th) {
+            val exact = Bitmap.createScaledBitmap(b, tw, th, true)
+            if (b !== raw) b.recycle()
+            b = exact
+        }
+        val turned = rotate(b, turn)
+        // El original de la tanda se libera después: nunca devolverlo tal cual
+        return if (turned === raw) raw.copy(Bitmap.Config.ARGB_8888, true) else argb(turned)
+    }
+
+    private fun rotate(b: Bitmap, deg: Int): Bitmap =
+        if (deg == 0) b else Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(deg.toFloat()) }, true)
 
     override fun close() = retriever.release()
 }
@@ -168,17 +307,12 @@ class GifClip private constructor(private val movie: Movie) : ClipSource() {
     }
 
     override fun extract(startMs: Long, endMs: Long): EditImage {
-        val len = max(1, endMs - startMs)
-        val step = extractStep(len, 60)
-        val frames = mutableListOf<Bitmap>()
-        val durations = mutableListOf<Int>()
-        var t = startMs
-        while (t < endMs) {
-            frames += frameAt(t, ImageLoader.MAX_ANIMATED_DIMENSION)
-            durations += min(step, endMs - t).toInt()
-            t += step
-        }
-        return EditImage(frames, durations)
+        val dim = ImageLoader.MAX_ANIMATED_DIMENSION
+        val s = min(1f, dim.toFloat() / max(movie.width(), movie.height()))
+        val maxFrames = ImageLoader.maxAnimatedFrames((movie.width() * s).roundToInt(), (movie.height() * s).roundToInt())
+        // Movie no dice cuándo cambia cada fotograma: se muestrea a 30 fps y se unen los repetidos
+        val times = sampleTimes(startMs, endMs, frameStepMs.toDouble(), maxFrames)
+        return mergeRepeated(times.map { frameAt(it, dim) }, durationsFor(times, endMs))
     }
 
     companion object {

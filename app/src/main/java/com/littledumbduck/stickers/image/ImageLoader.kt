@@ -18,7 +18,24 @@ object ImageLoader {
 
     /** Las animaciones se editan directamente a tamaño de sticker para no agotar la memoria. */
     const val MAX_ANIMATED_DIMENSION = 512
-    const val MAX_ANIMATED_FRAMES = 60
+
+    /** Fotogramas por segundo a los que se extraen vídeos y GIF (si la fuente tiene tantos). */
+    const val TARGET_FPS = 30
+
+    /** Límites del número de fotogramas de una animación en el editor. */
+    const val MIN_ANIMATED_FRAMES = 60
+    const val MAX_ANIMATED_FRAMES = 300
+
+    /**
+     * Cuántos fotogramas de [width]x[height] se pueden tener en el editor. Se reserva una parte de
+     * la memoria de la app porque cada edición crea una copia de todos los fotogramas (y se guardan
+     * algunas para deshacer). Con 512 MB de memoria, un vídeo vertical cabe a 30 fps unos 6 s.
+     */
+    fun maxAnimatedFrames(width: Int, height: Int): Int {
+        val perFrame = max(1L, width.toLong() * height * 4)
+        val budget = Runtime.getRuntime().maxMemory() / 5
+        return (budget / perFrame).toInt().coerceIn(MIN_ANIMATED_FRAMES, MAX_ANIMATED_FRAMES)
+    }
 
     /**
      * Carga una imagen para el editor. Si [allowAnimation] es true, los WebP animados, GIF y

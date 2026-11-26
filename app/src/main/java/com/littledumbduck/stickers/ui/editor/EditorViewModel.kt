@@ -20,6 +20,7 @@ import com.littledumbduck.stickers.image.FramesClip
 import com.littledumbduck.stickers.image.ImageLoader
 import com.littledumbduck.stickers.image.SmartCutout
 import com.littledumbduck.stickers.image.StickerProcessor
+import com.littledumbduck.stickers.image.WebpCodec
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +29,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 data class SeekRequest(val ms: Long, val precise: Boolean, val id: Int)
 
@@ -368,32 +370,95 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun save(onDone: () -> Unit) {
+    /**
+     * Sticker animado ya generado que no ha cabido en los 500 KB de WhatsApp sin perder fluidez o
+     * calidad: se pregunta antes de guardarlo.
+     */
+    class PendingSave internal constructor(
+        val report: StickerBuilder.AnimatedReport,
+        internal val output: StickerBuilder.Output,
+        internal val emojis: List<String>,
+        internal val borderColor: Int?,
+        internal val borderWidth: Int,
+        internal val onDone: () -> Unit,
+    )
+
+    var pendingSave by mutableStateOf<PendingSave?>(null)
+        private set
+
+    fun save(onDone: () -> Unit) = build(onDone, minQuality = null)
+
+    /** Guarda el sticker pendiente tal cual. */
+    fun confirmPendingSave() {
+        val p = pendingSave ?: return
+        pendingSave = null
+        runBusy("Guardando sticker…") { persist(p.output, p.emojis, p.borderColor, p.borderWidth, p.onDone) }
+    }
+
+    /** Vuelve a generar el sticker pendiente bajando más la calidad para conservar fotogramas. */
+    fun retryPendingSmoother() {
+        val p = pendingSave ?: return
+        pendingSave = null
+        build(p.onDone, minQuality = StickerBuilder.SMOOTH_MIN_QUALITY)
+    }
+
+    fun discardPendingSave() {
+        pendingSave = null
+    }
+
+    /** [minQuality] null = calidad mínima por defecto (y se avisa si hay que sacrificar algo). */
+    private fun build(onDone: () -> Unit, minQuality: Int?) {
         if (image == null) return
         val color = borderColor
         val width = borderWidth
         val emo = emojis
         val animated = animatedPack
-        runBusy(if (animated && clip != null) "Generando sticker animado…" else "Guardando sticker…") {
+        val baseText = if (animated && clip != null) "Generando sticker animado…" else "Guardando sticker…"
+        runBusy(baseText) {
             if (trimDirty) applyTrimNow()
             val img = image ?: return@runBusy
-            withContext(Dispatchers.Default) {
-                val out = StickerBuilder.build(img, animated, color, width)
-                withContext(Dispatchers.IO) {
-                    repo.putSticker(
-                        packId = packId,
-                        webp = out.webp,
-                        source = out.source,
-                        sourceExtension = out.sourceExtension,
-                        emojis = emo,
-                        borderColor = color,
-                        borderWidth = if (color != null) width else 0,
-                        replaceFileName = replaceFile,
-                    )
-                }
+            val out = withContext(Dispatchers.Default) {
+                StickerBuilder.build(
+                    img, animated, color, width,
+                    minQuality = minQuality ?: WebpCodec.DEFAULT_MIN_QUALITY,
+                    onProgress = { fps ->
+                        viewModelScope.launch {
+                            if (busyMessage != null) busyMessage = "Ajustando a 500 KB · probando ${fps.roundToInt()} fps…"
+                        }
+                    },
+                )
             }
-            onDone()
+            val report = out.report
+            // Al pedir más fluidez explícitamente ya no se vuelve a preguntar
+            if (report != null && report.needsWarning && minQuality == null) {
+                pendingSave = PendingSave(report, out, emo, color, width, onDone)
+                return@runBusy
+            }
+            busyMessage = "Guardando sticker…"
+            persist(out, emo, color, width, onDone)
         }
+    }
+
+    private suspend fun persist(
+        out: StickerBuilder.Output,
+        emo: List<String>,
+        color: Int?,
+        width: Int,
+        onDone: () -> Unit,
+    ) {
+        withContext(Dispatchers.IO) {
+            repo.putSticker(
+                packId = packId,
+                webp = out.webp,
+                source = out.source,
+                sourceExtension = out.sourceExtension,
+                emojis = emo,
+                borderColor = color,
+                borderWidth = if (color != null) width else 0,
+                replaceFileName = replaceFile,
+            )
+        }
+        onDone()
     }
 
     override fun onCleared() {
