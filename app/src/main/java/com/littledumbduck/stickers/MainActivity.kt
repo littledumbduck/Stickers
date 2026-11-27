@@ -19,6 +19,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.littledumbduck.stickers.ui.editor.EditorScreen
+import com.littledumbduck.stickers.ui.editor.EditorTool
 import com.littledumbduck.stickers.ui.home.HomeScreen
 import com.littledumbduck.stickers.ui.pack.PackDetailScreen
 import com.littledumbduck.stickers.ui.theme.StickersTheme
@@ -54,7 +55,7 @@ class MainActivity : ComponentActivity() {
 object Routes {
     const val HOME = "home"
     const val PACK = "pack/{packId}"
-    const val EDITOR = "editor/{packId}?src={src}&sticker={sticker}"
+    const val EDITOR = "editor/{packId}?src={src}&sticker={sticker}&tool={tool}"
     const val WA_PICK = "wa_pick/{packId}"
     const val TIKTOK = "tiktok?url={url}&packId={packId}"
 
@@ -65,10 +66,11 @@ object Routes {
     fun waPick(packId: String) = "wa_pick/${Uri.encode(packId)}"
 
     /** Abre el editor con una imagen nueva ([src]) o para reeditar un sticker existente ([sticker]). */
-    fun editor(packId: String, src: Uri? = null, sticker: String? = null): String {
+    fun editor(packId: String, src: Uri? = null, sticker: String? = null, tool: String? = null): String {
         val sb = StringBuilder("editor/${Uri.encode(packId)}")
         sb.append("?src=").append(src?.let { Uri.encode(it.toString()) }.orEmpty())
         sb.append("&sticker=").append(sticker?.let { Uri.encode(it) }.orEmpty())
+        sb.append("&tool=").append(tool.orEmpty())
         return sb.toString()
     }
 }
@@ -124,6 +126,7 @@ fun AppNavigation(
                 onBack = { nav.popBackStack() },
                 onNewSticker = { uri -> nav.navigate(Routes.editor(packId, src = uri)) },
                 onEditSticker = { file -> nav.navigate(Routes.editor(packId, sticker = file)) },
+                onEditSound = { file -> nav.navigate(Routes.editor(packId, sticker = file, tool = "AUDIO")) },
                 onImportFromWhatsApp = { nav.navigate(Routes.waPick(packId)) },
                 onImportFromTikTok = { nav.navigate(Routes.tiktok(packId = packId)) },
             )
@@ -150,16 +153,19 @@ fun AppNavigation(
                 navArgument("packId") { type = NavType.StringType },
                 navArgument("src") { type = NavType.StringType; defaultValue = "" },
                 navArgument("sticker") { type = NavType.StringType; defaultValue = "" },
+                navArgument("tool") { type = NavType.StringType; defaultValue = "" },
             ),
         ) { entry ->
             val args = entry.arguments
             val packId = args?.getString("packId").orEmpty()
             val src = args?.getString("src").orEmpty().ifEmpty { null }?.let(Uri::parse)
             val sticker = args?.getString("sticker").orEmpty().ifEmpty { null }
+            val tool = args?.getString("tool").orEmpty().let { t -> EditorTool.entries.firstOrNull { it.name == t } }
             EditorScreen(
                 packId = packId,
                 sourceUri = src,
                 stickerFile = sticker,
+                initialTool = tool,
                 onClose = { nav.popBackStack() },
                 onSaved = {
                     // Volver a la ficha del paquete (creándola si venimos de la pestaña de WhatsApp)

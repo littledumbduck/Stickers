@@ -41,6 +41,12 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import com.littledumbduck.stickers.audio.AudioKind
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.outlined.Collections
 import androidx.compose.material3.AlertDialog
@@ -94,6 +100,7 @@ fun PackDetailScreen(
     onBack: () -> Unit,
     onNewSticker: (Uri) -> Unit,
     onEditSticker: (fileName: String) -> Unit,
+    onEditSound: (fileName: String) -> Unit = onEditSticker,
     onImportFromWhatsApp: () -> Unit,
     onImportFromTikTok: () -> Unit = {},
 ) {
@@ -110,6 +117,9 @@ fun PackDetailScreen(
     var emojiFor by remember { mutableStateOf<Sticker?>(null) }
     var deleteSticker by remember { mutableStateOf<Sticker?>(null) }
     var chooseApp by remember { mutableStateOf(false) }
+    var exportSound by remember { mutableStateOf<Sticker?>(null) }
+    var exportAll by remember { mutableStateOf(false) }
+    val (playSound, stopSound) = rememberStickerSoundPlayer()
 
     // Estado en WhatsApp
     var installedApps by remember { mutableStateOf(emptyList<String>()) }
@@ -170,6 +180,13 @@ fun PackDetailScreen(
                             enabled = !pack.isFull,
                             onClick = { menu = false; onImportFromWhatsApp() },
                         )
+                        if (pack.soundCount > 0) {
+                            DropdownMenuItem(
+                                text = { Text("Exportar stickers con sonido") },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.VolumeUp, null) },
+                                onClick = { menu = false; exportAll = true },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Eliminar paquete") },
                             leadingIcon = { Icon(Icons.Default.Delete, null) },
@@ -221,6 +238,17 @@ fun PackDetailScreen(
                         modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp),
                         style = MaterialTheme.typography.labelSmall,
                     )
+                    // Encima de la imagen: toca el altavoz para escucharlo
+                    if (st.hasAudio) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.VolumeUp,
+                            "Con sonido",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).size(22.dp)
+                                .clip(RoundedCornerShape(50))
+                                .clickable { playSound(File(dir, st.audioFile!!)) },
+                        )
+                    }
                 }
             }
             if (!pack.isFull) {
@@ -234,17 +262,15 @@ fun PackDetailScreen(
                                 RoundedCornerShape(14.dp),
                             )
                             .clickable {
-                                // En paquetes animados también se aceptan vídeos (los GIF ya son imágenes)
-                                val type = if (pack.animated) ActivityResultContracts.PickVisualMedia.ImageAndVideo
-                                else ActivityResultContracts.PickVisualMedia.ImageOnly
-                                pickImage.launch(PickVisualMediaRequest(type))
+                                // También vídeos en paquetes estáticos: se elige un fotograma (y su sonido)
+                                pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                             },
                         contentAlignment = Alignment.Center,
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary)
                             Text(
-                                if (pack.animated) "GIF o vídeo" else "Desde galería",
+                                if (pack.animated) "GIF o vídeo" else "Imagen o vídeo",
                                 style = MaterialTheme.typography.labelSmall,
                             )
                         }
@@ -296,7 +322,7 @@ fun PackDetailScreen(
 
     sheetSticker?.let { st ->
         val index = pack.stickers.indexOfFirst { it.fileName == st.fileName }
-        ModalBottomSheet(onDismissRequest = { sheetSticker = null }) {
+        ModalBottomSheet(onDismissRequest = { sheetSticker = null; stopSound() }) {
             Column(Modifier.navigationBarsPadding().padding(bottom = 16.dp)) {
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     AsyncImage(
@@ -309,6 +335,41 @@ fun PackDetailScreen(
                     leadingContent = { Icon(Icons.Default.Edit, null) },
                     modifier = Modifier.clickable { sheetSticker = null; onEditSticker(st.fileName) },
                 )
+                if (st.hasAudio) {
+                    ListItem(
+                        headlineContent = { Text("Escuchar sonido") },
+                        supportingContent = {
+                            Text("${soundLabel(st)} · ${"%.1f".format(st.audioDurationMs / 1000f)} s")
+                        },
+                        leadingContent = { Icon(Icons.Default.PlayArrow, null) },
+                        modifier = Modifier.clickable { playSound(File(repo.packDir(pack.identifier), st.audioFile!!)) },
+                    )
+                }
+                ListItem(
+                    headlineContent = { Text(if (st.hasAudio) "Cambiar sonido" else "Añadir sonido") },
+                    supportingContent = { Text("Audio del vídeo, archivo, otro vídeo o nota de voz") },
+                    leadingContent = { Icon(Icons.Default.MusicNote, null) },
+                    modifier = Modifier.clickable { sheetSticker = null; stopSound(); onEditSound(st.fileName) },
+                )
+                ListItem(
+                    headlineContent = { Text("Exportar para WhatsApp como vídeo") },
+                    supportingContent = {
+                        Text(if (st.hasAudio) "Para crear el sticker con sonido en WhatsApp" else "Vídeo mudo del sticker")
+                    },
+                    leadingContent = { Icon(Icons.Default.Movie, null) },
+                    modifier = Modifier.clickable { sheetSticker = null; stopSound(); exportSound = st },
+                )
+                if (st.hasAudio) {
+                    ListItem(
+                        headlineContent = { Text("Quitar sonido") },
+                        leadingContent = { Icon(Icons.AutoMirrored.Filled.VolumeOff, null) },
+                        modifier = Modifier.clickable {
+                            sheetSticker = null
+                            stopSound()
+                            scope.launch(Dispatchers.IO) { removeStickerSound(context, pack.identifier, st.fileName) }
+                        },
+                    )
+                }
                 ListItem(
                     headlineContent = { Text("Cambiar emojis") },
                     supportingContent = { Text(st.emojis.joinToString(" ")) },
@@ -407,6 +468,13 @@ fun PackDetailScreen(
         )
     }
 
+    exportSound?.let { st ->
+        SoundExportDialog(pack, st, onDismiss = { exportSound = null })
+    }
+    if (exportAll) {
+        ExportAllSoundsDialog(pack, onDismiss = { exportAll = false })
+    }
+
     if (chooseApp) {
         AlertDialog(
             onDismissRequest = { chooseApp = false },
@@ -442,7 +510,8 @@ private fun PackHeader(pack: StickerPack, dir: File) {
             Text(pack.name, style = MaterialTheme.typography.titleLarge)
             Text(
                 "de ${pack.publisher} · ${pack.stickers.size}/${StickerLimits.MAX_STICKERS} stickers" +
-                    if (pack.animated) " · animado" else "",
+                    (if (pack.animated) " · animado" else "") +
+                    (if (pack.soundCount > 0) " · ${pack.soundCount} con sonido 🔊" else ""),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -496,3 +565,5 @@ private fun WhatsAppBar(
         }
     }
 }
+
+private fun soundLabel(st: Sticker): String = AudioKind.fromName(st.audioKind)?.label ?: "Sonido"

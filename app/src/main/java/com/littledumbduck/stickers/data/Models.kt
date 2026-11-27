@@ -30,13 +30,25 @@ data class Sticker(
     val borderColor: Int? = null,
     /** Grosor del borde en píxeles sobre el lienzo de 512. */
     val borderWidth: Int = 0,
+    /** Sonido del sticker (.m4a, AAC mono) o null si es mudo. */
+    val audioFile: String? = null,
+    /** Origen del sonido (nombre de [com.littledumbduck.stickers.audio.AudioKind]). */
+    val audioKind: String? = null,
+    val audioDurationMs: Long = 0,
 ) {
+    val hasAudio get() = audioFile != null
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("file", fileName)
         put("emojis", JSONArray(emojis))
         sourceFile?.let { put("source", it) }
         borderColor?.let { put("borderColor", it) }
         put("borderWidth", borderWidth)
+        audioFile?.let {
+            put("audio", it)
+            put("audioKind", audioKind)
+            put("audioMs", audioDurationMs)
+        }
     }
 
     companion object {
@@ -50,6 +62,9 @@ data class Sticker(
                 sourceFile = o.optString("source").ifEmpty { null },
                 borderColor = if (o.has("borderColor")) o.getInt("borderColor") else null,
                 borderWidth = o.optInt("borderWidth", 0),
+                audioFile = o.optString("audio").ifEmpty { null },
+                audioKind = o.optString("audioKind").ifEmpty { null },
+                audioDurationMs = o.optLong("audioMs", 0L),
             )
         }
     }
@@ -82,6 +97,8 @@ data class StickerPack(
     }
 
     val isFull: Boolean get() = stickers.size >= StickerLimits.MAX_STICKERS
+
+    val soundCount: Int get() = stickers.count { it.hasAudio }
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("identifier", identifier)

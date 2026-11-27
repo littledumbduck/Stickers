@@ -16,6 +16,9 @@ import java.util.UUID
  *
  * Todas las operaciones son bloqueantes: llámalas desde Dispatchers.IO.
  */
+/** Sonido ya procesado que se guarda junto a un sticker. */
+class StickerAudio(val bytes: ByteArray, val kind: String, val durationMs: Long)
+
 class PackRepository private constructor(context: Context) {
 
     private val root = File(context.filesDir, "packs").apply { mkdirs() }
@@ -71,6 +74,7 @@ class PackRepository private constructor(context: Context) {
         borderColor: Int?,
         borderWidth: Int,
         replaceFileName: String? = null,
+        audio: StickerAudio? = null,
     ): Sticker = synchronized(lock) {
         val pack = requireNotNull(getPack(packId)) { "El paquete no existe" }
         if (replaceFileName == null && pack.isFull) {
@@ -83,12 +87,18 @@ class PackRepository private constructor(context: Context) {
         val srcName = source?.let { bytes ->
             "source_$key.$sourceExtension".also { File(dir, it).writeBytes(bytes) }
         }
+        val audioName = audio?.let { a ->
+            "sound_$key.m4a".also { File(dir, it).writeBytes(a.bytes) }
+        }
         val sticker = Sticker(
             fileName = webpName,
             emojis = emojis.take(StickerLimits.MAX_EMOJIS),
             sourceFile = srcName,
             borderColor = borderColor,
             borderWidth = borderWidth,
+            audioFile = audioName,
+            audioKind = audio?.kind,
+            audioDurationMs = audio?.durationMs ?: 0L,
         )
         val newList = if (replaceFileName != null) {
             val old = pack.stickers.firstOrNull { it.fileName == replaceFileName }
@@ -133,6 +143,17 @@ class PackRepository private constructor(context: Context) {
         refreshTray(pack.copy(stickers = list, imageDataVersion = pack.imageDataVersion + 1))
     }
 
+    /** Pone, cambia o quita (null) el sonido de un sticker sin tocar su imagen. */
+    fun setAudio(packId: String, fileName: String, audio: StickerAudio?) = mutate(packId) { pack ->
+        val st = pack.stickers.firstOrNull { it.fileName == fileName } ?: return@mutate pack
+        st.audioFile?.let { file(packId, it).delete() }
+        val name = audio?.let { a ->
+            "sound_${UUID.randomUUID().toString().take(8)}.m4a".also { file(packId, it).writeBytes(a.bytes) }
+        }
+        val updated = st.copy(audioFile = name, audioKind = audio?.kind, audioDurationMs = audio?.durationMs ?: 0L)
+        pack.copy(stickers = pack.stickers.map { if (it.fileName == fileName) updated else it })
+    }
+
     /** Usa el sticker indicado como icono del paquete (desactiva el icono automático). */
     fun setTrayFromSticker(packId: String, fileName: String) = mutate(packId) { pack ->
         val st = pack.stickers.firstOrNull { it.fileName == fileName } ?: return@mutate pack
@@ -144,6 +165,7 @@ class PackRepository private constructor(context: Context) {
     private fun deleteStickerFiles(packId: String, st: Sticker) {
         file(packId, st.fileName).delete()
         st.sourceFile?.let { file(packId, it).delete() }
+        st.audioFile?.let { file(packId, it).delete() }
     }
 
     /** Regenera el icono si es automático o si ya no existe. */

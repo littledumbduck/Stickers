@@ -22,6 +22,33 @@ App Android (Kotlin + Jetpack Compose) para crear, editar y gestionar paquetes d
   reproductor web de TikTok (`playAddr`), que no lleva marca de agua, igual que yt-dlp; si TikTok
   solo ofrece la versión marcada, se descarga esa y se avisa. Se conecta solo a TikTok, sin
   servicios de terceros. Prueba real: `TIKTOK_LIVE_URL=<enlace> ./gradlew testDebugUnitTest`.
+- **Stickers con sonido** (pestaña *Sonido* del editor). WhatsApp empezó a probar en noviembre de
+  2026 los stickers con sonido (beta de Android 2.26.47.1): el sonido va con stickers animados,
+  suena al tocar el icono del altavoz y se repite tres veces. Fuentes del sonido:
+  - **Audio del propio vídeo**, que por defecto sigue al tramo elegido en *Duración* (o empieza en
+    el fotograma elegido si el sticker es una imagen fija).
+  - **Archivo de audio** (MP3, M4A, OGG, WAV, FLAC… lo que sepa leer el móvil): una canción, un efecto…
+  - **Audio de otro vídeo**: la imagen de un vídeo con el sonido de otro.
+  - **Nota de voz** grabada con el micrófono (máx. 10 s).
+  - **Sonido guardado** al reeditar un sticker (se puede recortar, cambiar o recuperar).
+
+  Para cada fuente: forma de onda con el tramo elegido (máx. 10 s), mover el tramo de 0,5 en 0,5 s,
+  *Igualar al sticker* (misma duración que la animación), volumen 0–200 %, entrada y salida suaves,
+  normalizar, y **mezclar por debajo el audio original del vídeo** con su propio volumen (p. ej. una
+  música con las voces del vídeo de fondo). *Escuchar* reproduce el resultado final y arranca la
+  animación a la vez. El sonido se guarda como AAC mono 44,1 kHz (`sound_*.m4a`) junto al sticker.
+- **Fotograma de un vídeo**: en paquetes estáticos, al elegir un vídeo, GIF o WebP animado se elige
+  el instante exacto (reproducción, barra, paso fotograma a fotograma y *Usar este fotograma*). En
+  paquetes animados, *Fotograma fijo* hace lo mismo (imagen fija + sonido del vídeo, por ejemplo).
+- **Llevar el sonido a WhatsApp**: WhatsApp todavía **no** permite que otras apps incluyan el sonido
+  en un paquete (lo dicen en [WhatsApp/stickers#1163](https://github.com/WhatsApp/stickers/issues/1163):
+  «está en la hoja de ruta»), así que el paquete se sigue enviando sin sonido y, para cada sticker con
+  sonido, *Exportar para WhatsApp como vídeo* genera un MP4 512×512 (H.264 + AAC) con el fondo que
+  elijas (blanco, negro o croma). Se guarda en la galería (*Stickers con sonido*) o se comparte, y en
+  WhatsApp se crea con Stickers → **Crear** → el vídeo → botón de sonido → audio original. También se
+  puede guardar solo el audio (Música/*Stickers con sonido*) para la opción *Importar archivo* de
+  WhatsApp. Desde el menú del paquete se exportan todos de una vez. Cuando WhatsApp publique la API,
+  el sonido ya está guardado con cada sticker.
 - **Editor de imagen**:
   - **Duración** (vídeos, GIF y animaciones): línea de tiempo con miniaturas para elegir de qué
     segundo a qué segundo va el sticker (máx. 10 s). Arrastra los extremos o el tramo entero; si
@@ -61,7 +88,7 @@ Requiere JDK 17+ y el Android SDK (API 35).
 
 ```bash
 ./gradlew assembleDebug          # APK en app/build/outputs/apk/debug/
-./gradlew testDebugUnitTest      # pruebas de imagen, códec WebP, clips y línea de tiempo (Robolectric)
+./gradlew testDebugUnitTest      # pruebas de imagen, códec WebP, clips, línea de tiempo, audio y fotograma (Robolectric)
 ```
 
 Android 8.0 (API 26) o superior, móviles ARM. Los APK se firman con `app/debug.keystore` (clave de
@@ -71,6 +98,7 @@ depuración, no apta para Play Store) para que cada versión nueva se instale co
 
 ```
 app/src/main/java/com/littledumbduck/stickers/
+├── audio/       Sonido: decodificar/mezclar/codificar (MediaCodec), grabar, y exportar a MP4 para WhatsApp
 ├── data/        Modelos, repositorio en disco (filesDir/packs) e importador
 ├── image/       Carga de imágenes, procesado (recorte, lazo, borde, WebP) y recorte inteligente
 ├── whatsapp/    ContentProvider para WhatsApp, intent de añadir paquete y lector de la carpeta de stickers

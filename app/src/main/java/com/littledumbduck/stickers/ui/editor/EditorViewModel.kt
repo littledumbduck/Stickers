@@ -6,12 +6,22 @@ import android.graphics.Color
 import android.graphics.PointF
 import android.net.Uri
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import android.media.MediaPlayer
+import com.littledumbduck.stickers.audio.AudioBed
+import com.littledumbduck.stickers.audio.AudioCodec
+import com.littledumbduck.stickers.audio.AudioKind
+import com.littledumbduck.stickers.audio.SoundMixer
+import com.littledumbduck.stickers.audio.SoundSpec
 import com.littledumbduck.stickers.data.PackRepository
+import com.littledumbduck.stickers.data.StickerAudio
+import java.io.File
 import com.littledumbduck.stickers.data.StickerBuilder
 import com.littledumbduck.stickers.data.StickerImporter
 import com.littledumbduck.stickers.image.ClipSource
@@ -38,6 +48,7 @@ enum class EditorTool(val label: String) {
     SMART("Fondo"),
     ERASE("Borrar"),
     BORDER("Borde"),
+    AUDIO("Sonido"),
 }
 
 /**
@@ -97,7 +108,72 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var appliedEnd by mutableLongStateOf(0L)
         private set
 
-    val trimDirty get() = clip != null && (trimStart != appliedStart || trimEnd != appliedEnd)
+    val trimDirty
+        get() = clip != null && (
+            stillMode != appliedStill ||
+                if (stillMode) framePos != appliedStart else (trimStart != appliedStart || trimEnd != appliedEnd)
+            )
+
+    // ---- Fotograma fijo (elegir un instante de un vídeo/GIF) ----
+
+    /**
+     * true: el sticker es un único fotograma elegido del clip. Siempre en paquetes estáticos;
+     * opcional en los animados (p. ej. una foto fija con el audio del vídeo).
+     */
+    var stillMode by mutableStateOf(false)
+        private set
+
+    /** Instante del fotograma elegido (aún sin aplicar si difiere de [appliedStart]). */
+    var framePos by mutableLongStateOf(0L)
+        private set
+    private var appliedStill = false
+
+    // ---------------- Sonido ----------------
+
+    /** Origen del sonido, o null si el sticker es mudo. */
+    var audioKind by mutableStateOf<AudioKind?>(null)
+        private set
+    var audioUri by mutableStateOf<Uri?>(null)
+        private set
+    /** Nombre que se muestra de la fuente (archivo, vídeo…). */
+    var audioName by mutableStateOf<String?>(null)
+        private set
+    /** Duración total de la fuente de sonido. */
+    var audioSourceMs by mutableLongStateOf(0L)
+        private set
+    var audioStart by mutableLongStateOf(0L)
+        private set
+    var audioEnd by mutableLongStateOf(0L)
+        private set
+    /** Forma de onda de la fuente completa. */
+    var audioPeaks by mutableStateOf<FloatArray?>(null)
+        private set
+    /** Con el audio del propio vídeo: el sonido sigue al tramo elegido en "Duración". */
+    var audioSync by mutableStateOf(true)
+    var audioVolume by mutableFloatStateOf(1f)
+    var fadeIn by mutableStateOf(false)
+    var fadeOut by mutableStateOf(false)
+    var normalizeAudio by mutableStateOf(false)
+    /** Volumen del audio original del vídeo mezclado por debajo (0 = sin mezclar). */
+    var bedVolume by mutableFloatStateOf(0f)
+    /** El vídeo de origen tiene pista de sonido. */
+    var videoHasAudio by mutableStateOf(false)
+        private set
+    var audioPlaying by mutableStateOf(false)
+        private set
+    /** Cambia cada vez que empieza a sonar la vista previa (para sincronizar la animación). */
+    var audioPlayToken by mutableIntStateOf(0)
+        private set
+    private var player: MediaPlayer? = null
+    private var previewKey: SoundSpec? = null
+    private val previewFile by lazy { File(getApplication<Application>().cacheDir, "sound_preview.m4a") }
+    /** Copia del sonido del sticker que se está reeditando (el original se borra al guardar). */
+    private var existingAudio: File? = null
+    /** Origen con el que se creó el sonido guardado. */
+    private var existingKind: String? = null
+
+    /** El sticker que se reedita ya tenía sonido (se puede recuperar tras quitarlo o cambiarlo). */
+    val hasSavedAudio get() = existingAudio != null
 
     // ---- Vista previa de la fuente completa en "Duración" ----
 
@@ -140,6 +216,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     val isEditingExisting get() = replaceFile != null
 
+    /** Hay ediciones o un sonido nuevo que se perderían al salir. */
+    val hasUnsavedChanges get() = canUndo || (audioKind != null && audioKind != AudioKind.EXISTING)
+
     init {
         // Vista previa al arrastrar: siempre se atiende la última posición pedida
         viewModelScope.launch {
@@ -152,7 +231,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun load(packId: String, source: Uri?, stickerFile: String?) {
+    fun load(packId: String, source: Uri?, stickerFile: String?, initialTool: EditorTool? = null) {
         val key = "$packId|$source|$stickerFile"
         if (loadedKey == key) return
         loadedKey = key
@@ -173,11 +252,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 // Un sticker animado ya guardado también se puede acortar
                 if (img.isAnimated) openClip(FramesClip(img), wholeClip = true) else setBase(img)
                 tool = EditorTool.BORDER
+                st.audioFile?.let { repo.file(packId, it) }?.takeIf { it.exists() }?.let { f ->
+                    val copy = File(ctx.cacheDir, "sound_existing.m4a")
+                    withContext(Dispatchers.IO) { f.copyTo(copy, overwrite = true) }
+                    existingAudio = copy
+                    existingKind = st.audioKind
+                    loadAudioSource(Uri.fromFile(copy), AudioKind.EXISTING, "Sonido guardado", wholeSource = true)
+                }
             } else {
                 val uri = requireNotNull(source) { "No hay imagen" }
-                val newClip = if (pack.animated) withContext(Dispatchers.IO) { ClipSource.open(ctx, uri) } else null
+                // También en paquetes estáticos: de un vídeo o GIF se elige el fotograma
+                val newClip = withContext(Dispatchers.IO) { ClipSource.open(ctx, uri) }
                 if (newClip != null) {
+                    stillMode = !pack.animated
                     openClip(newClip, wholeClip = false)
+                    videoHasAudio = newClip.videoUri?.let { v ->
+                        withContext(Dispatchers.IO) { AudioCodec.hasAudio(ctx, v) }
+                    } ?: false
                     tool = EditorTool.TRIM
                 } else {
                     val img = withContext(Dispatchers.IO) { ImageLoader.loadEditable(ctx, uri, pack.animated) }
@@ -186,6 +277,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (hasTransparentPixels(img.first)) tool = EditorTool.BORDER
                 }
             }
+            if (initialTool != null && (initialTool != EditorTool.TRIM || clip != null)) tool = initialTool
         }
     }
 
@@ -194,9 +286,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val (s, e) = if (wholeClip) 0L to c.durationMs else c.defaultRange()
         trimStart = s
         trimEnd = e
-        val base = withContext(Dispatchers.IO) { c.extract(s, e) }
-        appliedStart = s
-        appliedEnd = e
+        framePos = 0L
+        val base = withContext(Dispatchers.IO) { if (stillMode) stillFrame(c, 0L) else c.extract(s, e) }
+        appliedStart = if (stillMode) 0L else s
+        appliedEnd = if (stillMode) 0L else e
+        appliedStill = stillMode
         setBase(base)
     }
 
@@ -216,12 +310,55 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         tool = t
     }
 
+    /** Paquetes animados: alterna entre animación y fotograma fijo. */
+    fun chooseStill(still: Boolean) {
+        val c = clip ?: return
+        if (!animatedPack || still == stillMode) return
+        stillMode = still
+        if (still) {
+            framePos = c.snap(previewPos)
+            previewWhole = true
+        }
+    }
+
+    /** Elige como fotograma el instante que se está viendo y lo aplica. */
+    fun useCurrentFrame() {
+        val c = clip ?: return
+        framePos = c.snap(previewPos)
+        // Con el audio del vídeo, el sonido empieza en el fotograma elegido
+        if (audioKind == AudioKind.VIDEO_ORIGINAL) {
+            val len = (audioEnd - audioStart).coerceAtLeast(SoundMixer.MIN_MS)
+            audioStart = framePos.coerceAtMost(max(0L, audioSourceMs - SoundMixer.MIN_MS))
+            audioEnd = min(audioSourceMs, audioStart + len)
+        }
+        applyTrim()
+    }
+
+    /** Avanza o retrocede [delta] fotogramas en la vista previa. */
+    fun stepFrame(delta: Int) {
+        val c = clip ?: return
+        previewPlaying = false
+        seekPreview(c.snap(previewPos) + delta * c.frameStepMs + if (delta > 0) 1 else 0)
+    }
+
+    private fun stillFrame(c: ClipSource, t: Long): EditImage = EditImage.single(
+        c.frameAt(t, if (animatedPack) ImageLoader.MAX_ANIMATED_DIMENSION else ImageLoader.MAX_EDIT_DIMENSION)
+    )
+
     fun setTrim(start: Long, end: Long) {
         trimStart = start
         trimEnd = end
     }
 
-    fun resetTrim() = setTrim(appliedStart, appliedEnd)
+    fun resetTrim() {
+        if (appliedStill) {
+            stillMode = true
+            framePos = appliedStart
+        } else {
+            stillMode = false
+            setTrim(appliedStart, appliedEnd)
+        }
+    }
 
     /** Pide (de forma asíncrona) el fotograma del instante [t] para la vista previa; null la quita. */
     fun scrubTo(t: Long?) {
@@ -297,13 +434,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun applyTrimNow() {
         val c = clip ?: return
-        val s = trimStart
-        val e = trimEnd
-        val base = withContext(Dispatchers.IO) { c.extract(s, e) }
+        val still = stillMode
+        val s = if (still) framePos else trimStart
+        val e = if (still) framePos else trimEnd
+        val base = withContext(Dispatchers.IO) { if (still) stillFrame(c, s) else c.extract(s, e) }
         val edited = replay(base, ops)
         baseImage = base
         appliedStart = s
         appliedEnd = e
+        appliedStill = still
         history.clear() // las imágenes guardadas eran de otro tramo; se rehacen si se deshace
         image = edited
     }
@@ -374,9 +513,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val width = borderWidth
         val emo = emojis
         val animated = animatedPack
+        stopAudio()
         runBusy(if (animated && clip != null) "Generando sticker animado…" else "Guardando sticker…") {
             if (trimDirty) applyTrimNow()
             val img = image ?: return@runBusy
+            val sound = soundSpec()?.let { spec ->
+                busyMessage = "Preparando el sonido…"
+                withContext(Dispatchers.IO) { renderSound(spec) }
+            }
             withContext(Dispatchers.Default) {
                 val out = StickerBuilder.build(img, animated, color, width)
                 withContext(Dispatchers.IO) {
@@ -389,6 +533,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         borderColor = color,
                         borderWidth = if (color != null) width else 0,
                         replaceFileName = replaceFile,
+                        audio = sound,
                     )
                 }
             }
@@ -398,6 +543,192 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         clip?.close()
+        player?.release()
+        player = null
+    }
+
+    // ---------------- Sonido ----------------
+
+    /** Tramo efectivo de la fuente de sonido. */
+    val audioRange: Pair<Long, Long>
+        get() = if (audioKind == AudioKind.VIDEO_ORIGINAL && audioSync && !stillMode && clip != null) {
+            trimStart to min(trimEnd, trimStart + SoundMixer.MAX_MS)
+        } else audioStart to audioEnd
+
+    /** ¿Se puede mezclar por debajo el audio original del vídeo? */
+    val canMixVideoAudio
+        get() = videoHasAudio && clip?.videoUri != null && audioKind != null && audioKind != AudioKind.VIDEO_ORIGINAL
+
+    /** Duración del sticker animado (para igualar el sonido), o null si es estático. */
+    val stickerLengthMs: Long?
+        get() = when {
+            !animatedPack -> null
+            clip != null && !stillMode -> trimEnd - trimStart
+            image?.isAnimated == true -> image!!.durations.sum().toLong()
+            else -> null
+        }
+
+    /**
+     * Elige una fuente de sonido: un archivo de audio, otro vídeo, una nota de voz o el propio
+     * vídeo ([uri] null con [AudioKind.VIDEO_ORIGINAL]).
+     */
+    fun setAudioSource(uri: Uri?, kind: AudioKind, name: String? = null) {
+        if (busyMessage != null) return
+        val src = if (kind == AudioKind.VIDEO_ORIGINAL) clip?.videoUri else uri
+        if (src == null) return
+        stopAudio()
+        runBusy("Leyendo el sonido…") { loadAudioSource(src, kind, name, wholeSource = false) }
+    }
+
+    private suspend fun loadAudioSource(uri: Uri, kind: AudioKind, name: String?, wholeSource: Boolean) {
+        val ctx = getApplication<Application>()
+        val dur = withContext(Dispatchers.IO) {
+            require(AudioCodec.hasAudio(ctx, uri)) {
+                if (kind == AudioKind.OTHER_VIDEO) "Ese vídeo no tiene sonido" else "No se encontró sonido en el archivo"
+            }
+            AudioCodec.durationMs(ctx, uri)
+        }
+        require(dur > 0) { "No se pudo leer la duración del sonido" }
+        audioKind = kind
+        audioUri = uri
+        audioName = name ?: kind.label
+        audioSourceMs = dur
+        audioPeaks = null
+        bedVolume = 0f
+        val wanted = stickerLengthMs ?: DEFAULT_SOUND_MS
+        when {
+            wholeSource -> { audioStart = 0; audioEnd = min(dur, SoundMixer.MAX_MS) }
+            kind == AudioKind.VIDEO_ORIGINAL -> {
+                audioSync = !stillMode
+                audioStart = (if (stillMode) framePos else trimStart).coerceIn(0, max(0, dur - SoundMixer.MIN_MS))
+                audioEnd = min(dur, audioStart + if (stillMode) DEFAULT_SOUND_MS else trimEnd - trimStart)
+            }
+            kind == AudioKind.RECORDING -> { audioStart = 0; audioEnd = min(dur, SoundMixer.MAX_MS) }
+            else -> { audioStart = 0; audioEnd = min(dur, min(wanted, SoundMixer.MAX_MS)) }
+        }
+        viewModelScope.launch {
+            audioPeaks = runCatching {
+                withContext(Dispatchers.IO) { AudioCodec.peaks(ctx, uri, dur, PEAK_BUCKETS) }
+            }.getOrNull()
+        }
+    }
+
+    fun restoreSavedAudio() {
+        val f = existingAudio ?: return
+        if (busyMessage != null) return
+        stopAudio()
+        runBusy("Leyendo el sonido…") {
+            loadAudioSource(Uri.fromFile(f), AudioKind.EXISTING, "Sonido guardado", wholeSource = true)
+        }
+    }
+
+    fun removeAudio() {
+        stopAudio()
+        audioKind = null
+        audioUri = null
+        audioPeaks = null
+        bedVolume = 0f
+    }
+
+    /** Cambia el tramo del sonido respetando el mínimo y el máximo. */
+    fun setAudioRange(start: Long, end: Long) {
+        val dur = audioSourceMs
+        var s = start.coerceIn(0, max(0, dur - SoundMixer.MIN_MS))
+        var e = end.coerceIn(s + min(SoundMixer.MIN_MS, dur), dur)
+        if (e - s > SoundMixer.MAX_MS) {
+            // Se mueve el extremo que no se ha tocado
+            if (s != audioStart) e = s + SoundMixer.MAX_MS else s = e - SoundMixer.MAX_MS
+        }
+        audioSync = false
+        audioStart = s
+        audioEnd = e
+    }
+
+    /** Desplaza el tramo del sonido conservando su duración. */
+    fun shiftAudio(deltaMs: Long) {
+        val len = audioEnd - audioStart
+        val s = (audioStart + deltaMs).coerceIn(0, max(0, audioSourceMs - len))
+        audioSync = false
+        audioStart = s
+        audioEnd = s + len
+    }
+
+    /** Ajusta la duración del sonido a la de la animación. */
+    fun matchStickerLength() {
+        val len = stickerLengthMs ?: return
+        val s = audioStart.coerceAtMost(max(0, audioSourceMs - len))
+        audioSync = false
+        audioStart = s
+        audioEnd = min(audioSourceMs, s + len)
+    }
+
+    fun soundSpec(): SoundSpec? {
+        val kind = audioKind ?: return null
+        val uri = audioUri ?: return null
+        val (s, e) = audioRange
+        val bed = if (canMixVideoAudio && bedVolume > 0f) {
+            AudioBed(clip!!.videoUri!!, if (stillMode) framePos else trimStart, bedVolume)
+        } else null
+        return SoundSpec(
+            uri = uri,
+            kind = kind,
+            startMs = s,
+            endMs = e,
+            volume = audioVolume,
+            fadeInMs = if (fadeIn) FADE_MS else 0,
+            fadeOutMs = if (fadeOut) FADE_MS else 0,
+            normalize = normalizeAudio,
+            bed = bed,
+        )
+    }
+
+    /** Genera el .m4a final. El sonido guardado sin cambios se copia tal cual (sin recomprimir). */
+    private fun renderSound(spec: SoundSpec): StickerAudio {
+        val ctx = getApplication<Application>()
+        val untouched = spec.kind == AudioKind.EXISTING && spec.startMs == 0L && spec.endMs >= audioSourceMs &&
+            spec.volume == 1f && spec.fadeInMs == 0 && spec.fadeOutMs == 0 && !spec.normalize && spec.bed == null
+        val existing = existingAudio
+        if (untouched && existing != null && existing.exists()) {
+            return StickerAudio(existing.readBytes(), existingKind ?: AudioKind.EXISTING.name, audioSourceMs)
+        }
+        val out = File(ctx.cacheDir, "sound_render.m4a")
+        val ms = SoundMixer.renderToFile(ctx, spec, out)
+        // Si se reeditó el sonido guardado se conserva su origen
+        val kind = if (spec.kind == AudioKind.EXISTING) existingKind ?: spec.kind.name else spec.kind.name
+        return StickerAudio(out.readBytes(), kind, ms)
+    }
+
+    /** Escucha el sonido tal como quedará (con volumen, mezcla y fundidos). */
+    fun toggleAudioPreview() {
+        if (audioPlaying) {
+            stopAudio()
+            return
+        }
+        val spec = soundSpec() ?: return
+        if (busyMessage != null) return
+        runBusy("Preparando el sonido…") {
+            val ctx = getApplication<Application>()
+            if (spec != previewKey || !previewFile.exists()) {
+                withContext(Dispatchers.IO) { SoundMixer.renderToFile(ctx, spec, previewFile) }
+                previewKey = spec
+            }
+            player?.release()
+            player = MediaPlayer().apply {
+                setDataSource(previewFile.absolutePath)
+                setOnCompletionListener { audioPlaying = false }
+                prepare()
+                start()
+            }
+            audioPlaying = true
+            audioPlayToken++
+        }
+    }
+
+    fun stopAudio() {
+        runCatching { player?.stop() }
+        player?.release()
+        player = null
+        audioPlaying = false
     }
 
     // ---------------- Internos ----------------
@@ -494,6 +825,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val MAX_HISTORY = 8
+        private const val DEFAULT_SOUND_MS = 5_000L
+        private const val FADE_MS = 300
+        const val PEAK_BUCKETS = 160
         private const val MAX_HISTORY_BYTES = 160L * 1024 * 1024
     }
 }

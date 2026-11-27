@@ -39,6 +39,10 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.FilterChip
 import kotlin.math.max
 import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.RotateRight
@@ -107,6 +111,7 @@ private fun EditorTool.icon(): ImageVector = when (this) {
     EditorTool.SMART -> Icons.Default.AutoAwesome
     EditorTool.ERASE -> Icons.Default.AutoFixOff
     EditorTool.BORDER -> Icons.Default.BorderOuter
+    EditorTool.AUDIO -> Icons.Default.MusicNote
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -117,10 +122,12 @@ fun EditorScreen(
     stickerFile: String?,
     onClose: () -> Unit,
     onSaved: () -> Unit,
+    /** Herramienta con la que abrir el editor (p. ej. "Sonido" desde la ficha del paquete). */
+    initialTool: EditorTool? = null,
     vm: EditorViewModel = viewModel(),
 ) {
     val context = LocalContext.current
-    LaunchedEffect(packId, sourceUri, stickerFile) { vm.load(packId, sourceUri, stickerFile) }
+    LaunchedEffect(packId, sourceUri, stickerFile) { vm.load(packId, sourceUri, stickerFile, initialTool) }
 
     val img = vm.image
     val snackbar = remember { SnackbarHostState() }
@@ -134,6 +141,13 @@ fun EditorScreen(
     var frameIndex by remember(img) { mutableIntStateOf(0) }
     var userPlaying by remember { mutableStateOf(true) }
     val playing = img != null && img.isAnimated && userPlaying && vm.tool != EditorTool.BORDER
+    // Al escuchar el sonido, la animación empieza desde el principio a la vez
+    LaunchedEffect(vm.audioPlayToken) {
+        if (vm.audioPlayToken > 0) {
+            frameIndex = 0
+            userPlaying = true
+        }
+    }
     LaunchedEffect(img, playing) {
         val anim = img ?: return@LaunchedEffect
         while (playing) {
@@ -188,7 +202,7 @@ fun EditorScreen(
         preview = vm.renderPreview(frameIndex)
     }
 
-    BackHandler { if (vm.canUndo) confirmExit = true else onClose() }
+    BackHandler { if (vm.hasUnsavedChanges) confirmExit = true else onClose() }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -202,7 +216,7 @@ fun EditorScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = { if (vm.canUndo) confirmExit = true else onClose() }) {
+                    IconButton(onClick = { if (vm.hasUnsavedChanges) confirmExit = true else onClose() }) {
                         Icon(Icons.Default.Close, "Cerrar")
                     }
                 },
@@ -275,12 +289,25 @@ fun EditorScreen(
                 }
                 NavigationBar {
                     // "Duración" solo existe para vídeos, GIF y animaciones
+                    // De un vídeo en un paquete estático (o en modo fijo) se elige el fotograma
                     EditorTool.entries.filter { it != EditorTool.TRIM || vm.clip != null }.forEach { t ->
+                        val still = t == EditorTool.TRIM && vm.stillMode
                         NavigationBarItem(
                             selected = vm.tool == t,
                             onClick = { vm.selectTool(t) },
-                            icon = { Icon(t.icon(), null) },
-                            label = { Text(t.label, maxLines = 1) },
+                            icon = {
+                                Box {
+                                    Icon(if (still) Icons.Default.PhotoCamera else t.icon(), null)
+                                    // Punto indicador: el sticker tiene sonido
+                                    if (t == EditorTool.AUDIO && vm.audioKind != null) {
+                                        Box(
+                                            Modifier.align(Alignment.TopEnd).size(7.dp).clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primary)
+                                        )
+                                    }
+                                }
+                            },
+                            label = { Text(if (still) "Fotograma" else t.label, maxLines = 1) },
                         )
                     }
                 }
@@ -336,7 +363,12 @@ fun EditorScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (trimMode) {
+                if (trimMode && vm.stillMode) {
+                    InfoChip(
+                        "Elige el fotograma · ${formatSeconds(vm.previewPos)} de ${formatSeconds(clip!!.durationMs)}"
+                    )
+                    if (vm.trimDirty) InfoChip("Pulsa \"Usar este fotograma\" para quedarte con este instante")
+                } else if (trimMode) {
                     InfoChip(
                         when {
                             vm.scrubbing -> "Fotograma exacto del tirador"
@@ -353,6 +385,10 @@ fun EditorScreen(
                     )
                 } else if (img != null && vm.animatedPack) {
                     InfoChip("Paquete animado: la imagen se guardará como animación fija")
+                }
+                if (vm.audioKind != null && !trimMode) {
+                    val (a, b) = vm.audioRange
+                    InfoChip("🔊 ${vm.audioKind!!.label} · ${formatSeconds(b - a)}" + if (vm.audioPlaying) " · sonando" else "")
                 }
             }
 
@@ -430,7 +466,10 @@ private fun ToolPanel(
 ) {
     val busy = vm.busyMessage != null
     when (vm.tool) {
-        EditorTool.TRIM -> vm.clip?.let { clip -> TrimPanel(vm, clip, muted, onToggleMute) }
+        EditorTool.TRIM -> vm.clip?.let { clip ->
+            if (vm.stillMode) FramePanel(vm, clip, muted, onToggleMute) else TrimPanel(vm, clip, muted, onToggleMute)
+        }
+        EditorTool.AUDIO -> AudioPanel(vm)
         EditorTool.CROP -> Column {
             Hint("Arrastra las esquinas o mueve el recuadro. Pellizca con dos dedos para ampliar.")
             val isFull = imageSize != null && cropRect.left <= 0f && cropRect.top <= 0f &&
@@ -683,6 +722,88 @@ private fun TrimPanel(vm: EditorViewModel, clip: ClipSource, muted: Boolean, onT
                 onClick = { vm.choosePreviewWhole(false) },
                 label = { Text("Repetir el tramo") },
             )
+            FilterChip(
+                selected = false,
+                onClick = { vm.chooseStill(true) },
+                label = { Text("Fotograma fijo") },
+                leadingIcon = { Icon(Icons.Default.PhotoCamera, null, Modifier.size(18.dp)) },
+            )
+        }
+    }
+}
+
+/** "Fotograma": elegir un instante del vídeo/GIF como imagen fija. */
+@Composable
+private fun FramePanel(vm: EditorViewModel, clip: ClipSource, muted: Boolean, onToggleMute: () -> Unit) {
+    val busy = vm.busyMessage != null
+    val dur = clip.durationMs
+    Column {
+        Hint("Reproduce o arrastra hasta el instante que quieras y pulsa \"Usar este fotograma\". Luego puedes ponerle el sonido del vídeo (u otro) en Sonido.")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { vm.previewPlaying = !vm.previewPlaying }) {
+                Icon(
+                    if (vm.previewPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    if (vm.previewPlaying) "Pausar" else "Reproducir",
+                )
+            }
+            var dragging by remember { mutableStateOf<Float?>(null) }
+            Slider(
+                value = dragging ?: (vm.previewPos.toFloat() / max(1L, dur)),
+                onValueChange = {
+                    dragging = it
+                    vm.previewPlaying = false
+                    vm.seekPreview((it * dur).toLong(), precise = false)
+                },
+                onValueChangeFinished = {
+                    dragging?.let { vm.seekPreview((it * dur).toLong(), precise = true) }
+                    dragging = null
+                },
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                "${formatSeconds(vm.previewPos)} / ${formatSeconds(dur)}",
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
+            if (clip.videoUri != null) {
+                IconButton(onClick = onToggleMute) {
+                    Icon(
+                        if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        if (muted) "Activar sonido" else "Silenciar",
+                    )
+                }
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = { vm.stepFrame(-1) }) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Fotograma anterior")
+            }
+            IconButton(onClick = { vm.stepFrame(1) }) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Fotograma siguiente")
+            }
+            Text(
+                "Elegido: ${formatSeconds(vm.framePos)}",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f),
+            )
+            Button(onClick = vm::useCurrentFrame, enabled = !busy) {
+                Icon(Icons.Default.PhotoCamera, null, Modifier.size(18.dp))
+                Text("Usar este fotograma", Modifier.padding(start = 6.dp), maxLines = 1)
+            }
+        }
+        if (vm.animatedPack) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = false,
+                    onClick = { vm.chooseStill(false) },
+                    label = { Text("Volver a animación") },
+                )
+                if (vm.trimDirty) TextButton(onClick = vm::resetTrim, enabled = !busy) { Text("Deshacer") }
+            }
         }
     }
 }

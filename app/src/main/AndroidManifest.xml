@@ -4,6 +4,14 @@
     <!-- Para descargar vídeos de TikTok -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Grabar notas de voz para los stickers con sonido -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Guardar los vídeos con sonido en la galería en Android 9 o anterior -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
     <!-- Visibilidad de paquetes (Android 11+) para detectar WhatsApp y consultar su proveedor
          que indica si un paquete ya está añadido. -->
     <queries>
@@ -47,5 +55,16 @@
             android:enabled="true"
             android:exported="true"
             android:readPermission="com.whatsapp.sticker.READ" />
+
+        <!-- Compartir los vídeos/audios exportados de los stickers con sonido -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
